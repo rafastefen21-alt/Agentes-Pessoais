@@ -1,0 +1,352 @@
+/* Portal — SPA simples em JS puro. Rotas: #/ (pessoas), #/p/:id (pessoa), #/status */
+const $app = document.getElementById('app');
+const $nav = document.getElementById('nav');
+const $toast = document.getElementById('toast');
+let pollTimer = null;
+
+// ---------- utilidades ----------
+async function api(path, opts = {}) {
+  const res = await fetch('/api' + path, {
+    method: opts.method || 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({ ok: false, error: 'resposta inválida' }));
+  if (res.status === 401 && path !== '/login') { showLogin(); throw new Error('não autenticado'); }
+  if (!res.ok || data.ok === false) throw new Error(data.error || `erro ${res.status}`);
+  return data;
+}
+function toast(msg, err = false) {
+  $toast.textContent = msg; $toast.hidden = false; $toast.className = 'toast' + (err ? ' err' : '');
+  clearTimeout(toast.t); toast.t = setTimeout(() => { $toast.hidden = true; }, err ? 6000 : 3000);
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function fmtTs(ts) { return ts ? new Date(ts * 1000).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'; }
+function stateBadge(s) {
+  const map = { open: ['ok', 'Conectado'], connecting: ['warn', 'Aguardando QR'], close: ['bad', 'Desconectado'], disconnected: ['bad', 'Não conectado'], missing: ['bad', 'Instância ausente'] };
+  const [cls, label] = map[s] || ['', s || '—'];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+const URG = { 1: 'baixa', 2: 'média', 3: 'alta', 4: 'crítica' };
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+// ---------- login ----------
+function showLogin() {
+  stopPolling();
+  $nav.hidden = true;
+  $app.innerHTML = `
+    <div class="card login">
+      <h1>Entrar</h1>
+      <form id="loginForm">
+        <div class="field"><label>Senha do portal</label><input type="password" name="password" autofocus></div>
+        <button class="primary" type="submit">Entrar</button>
+      </form>
+    </div>`;
+  document.getElementById('loginForm').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/login', { method: 'POST', body: { password: e.target.password.value } });
+      $nav.hidden = false; route();
+    } catch (err) { toast(err.message, true); }
+  };
+}
+document.getElementById('logoutBtn').onclick = async () => { await api('/logout', { method: 'POST' }); showLogin(); };
+
+// ---------- lista de pessoas ----------
+async function viewPeople() {
+  stopPolling();
+  const { people } = await api('/people');
+  const cards = people.map((p) => `
+    <div class="card person-card" onclick="location.hash='#/p/${p.id}'">
+      <div class="row"><span class="name grow">${esc(p.name)}</span>${stateBadge(p.wa_state)}${p.active ? '' : '<span class="badge bad">pausado</span>'}</div>
+      <div class="meta">📱 ${esc(p.phone || 'número ainda não detectado')} ${p.email_enabled ? ' · ✉️ ' + esc(p.imap_user) : ''}${p.calendar_ics_url ? ' · 📅 agenda' : ''}</div>
+      <div class="stats">
+        <span>24h: <b>${p.stats.last24h.whatsapp || 0}</b> WhatsApp · <b>${p.stats.last24h.email || 0}</b> e-mails</span>
+        <span>Pendências: <b>${p.stats.openItems}</b> (<b>${p.stats.urgentItems}</b> urgentes)</span>
+      </div>
+    </div>`).join('');
+  $app.innerHTML = `
+    <div class="row" style="margin-bottom:16px"><h1 class="grow" style="margin:0">Pessoas com assistente</h1><button class="primary" id="newBtn">+ Nova pessoa</button></div>
+    ${people.length ? `<div class="grid">${cards}</div>` : '<div class="card empty">Nenhuma pessoa ainda. Clique em "Nova pessoa" para criar o primeiro assistente.</div>'}
+    <div class="card" id="newForm" hidden>
+      <h2>Nova pessoa</h2>
+      <form id="createForm">
+        <div class="two">
+          <div class="field"><label>Nome</label><input name="name" required placeholder="Ex.: Rafael Marques"></div>
+          <div class="field"><label>Número do WhatsApp (com DDI, só dígitos)</label><input name="phone" placeholder="5511999998888"><div class="hint">Pode deixar em branco: é detectado ao conectar o WhatsApp.</div></div>
+        </div>
+        <div class="field"><label>Contexto para a assistente (quem é a pessoa, prioridades, clientes VIP, tom de resposta)</label>
+          <textarea name="context_notes" placeholder="Ex.: Sou dono de uma agência de marketing. Clientes têm prioridade máxima. Fornecedores podem esperar. Respondo de forma curta e cordial. Minha esposa é a Ana; família sempre importante."></textarea></div>
+        <div class="two">
+          <div class="field"><label>Fuso horário</label><input name="timezone" value="America/Sao_Paulo"></div>
+          <div class="field"><label>Ler grupos de WhatsApp?</label><select name="ignore_groups"><option value="1">Não (ignorar grupos)</option><option value="0">Sim (ler grupos também)</option></select></div>
+        </div>
+        <div class="row"><button class="primary" type="submit">Criar assistente</button><button type="button" id="cancelNew">Cancelar</button></div>
+      </form>
+    </div>`;
+  document.getElementById('newBtn').onclick = () => { document.getElementById('newForm').hidden = false; };
+  document.getElementById('cancelNew').onclick = () => { document.getElementById('newForm').hidden = true; };
+  document.getElementById('createForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      const { person } = await api('/people', { method: 'POST', body: { name: f.get('name'), phone: f.get('phone'), context_notes: f.get('context_notes'), timezone: f.get('timezone'), ignore_groups: f.get('ignore_groups') === '1' } });
+      toast('Pessoa criada. Agora conecte o WhatsApp.');
+      location.hash = `#/p/${person.id}`;
+    } catch (err) { toast(err.message, true); }
+  };
+}
+
+// ---------- pessoa ----------
+let currentTab = 'whatsapp';
+async function viewPerson(id) {
+  stopPolling();
+  let data;
+  try { data = await api(`/people/${id}`); } catch (e) { $app.innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
+  const { person: p } = data;
+  const tabs = [['whatsapp', '📱 WhatsApp'], ['email', '✉️ E-mail'], ['calendar', '📅 Agenda'], ['prefs', '⚙️ Preferências'], ['items', '📌 Pendências'], ['chat', '💬 Conversa com a assistente'], ['messages', '📥 Mensagens lidas']];
+  $app.innerHTML = `
+    <div class="row" style="margin-bottom:12px">
+      <a href="#/">← Pessoas</a>
+      <h1 class="grow" style="margin:0">${esc(p.name)} ${stateBadge(p.wa_state)}</h1>
+      <button id="digestBtn">Enviar resumo agora</button>
+      <button id="testBtn">Mensagem de teste</button>
+    </div>
+    <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === currentTab ? 'active' : ''}">${l}</button>`).join('')}</div>
+    <div id="tabBody"></div>`;
+  document.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { currentTab = b.dataset.tab; viewPerson(id); }; });
+  document.getElementById('digestBtn').onclick = async () => { try { toast('Gerando resumo…'); await api(`/people/${id}/digest`, { method: 'POST' }); toast('Resumo enviado no WhatsApp.'); } catch (e) { toast(e.message, true); } };
+  document.getElementById('testBtn').onclick = async () => { try { await api(`/people/${id}/notify`, { method: 'POST', body: {} }); toast('Mensagem de teste enviada.'); } catch (e) { toast(e.message, true); } };
+  const body = document.getElementById('tabBody');
+  ({ whatsapp: tabWhatsApp, email: tabEmail, calendar: tabCalendar, prefs: tabPrefs, items: tabItems, chat: tabChat, messages: tabMessages })[currentTab](body, data);
+}
+
+function tabWhatsApp(body, { person: p }) {
+  body.innerHTML = `
+    <div class="card">
+      <h2>Conexão do WhatsApp</h2>
+      <p class="small muted">Instância na Evolution: <span class="mono">${esc(p.instance_name)}</span> · Número: <b>${esc(p.phone || 'não detectado')}</b></p>
+      <div id="waStatus">${stateBadge(p.wa_state)}</div>
+      <div id="qrBox" style="margin:14px 0"></div>
+      <div class="row">
+        <button class="primary" id="connectBtn">Conectar / gerar QR</button>
+        <button id="logoutBtn2">Desconectar</button>
+        <button class="danger" id="resetBtn">Recriar instância</button>
+        <button id="webhookBtn">Verificar webhook</button>
+      </div>
+      <div class="hint" style="margin-top:10px">No celular: WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho → escaneie o QR. O QR expira em ~40 s e é renovado automaticamente aqui.</div>
+      <pre id="webhookInfo" class="pre mono" hidden></pre>
+    </div>
+    <div class="card">
+      <h2>Como funciona</h2>
+      <ul class="small muted">
+        <li>A assistente lê as mensagens que chegam neste WhatsApp e classifica a urgência com IA.</li>
+        <li>Quando algo é urgente, ela avisa na conversa <b>"Você"</b> (mensagem para o próprio número), com resumo e sugestão de resposta.</li>
+        <li>A pessoa pode responder nessa mesma conversa: <i>enviar #12</i>, <i>resumo</i>, <i>agenda</i>, <i>feito #12</i> ou falar livremente ("responde pro João que amanhã às 10h").</li>
+        <li>Resumos periódicos nos horários configurados em Preferências.</li>
+      </ul>
+    </div>`;
+  const qrBox = document.getElementById('qrBox');
+  const render = (state, qr) => {
+    document.getElementById('waStatus').innerHTML = stateBadge(state);
+    if (state === 'open') { qrBox.innerHTML = '<p>✅ WhatsApp conectado. A assistente já está lendo as mensagens.</p>'; stopPolling(); return; }
+    if (qr) qrBox.innerHTML = `<div class="qr"><img src="${qr.startsWith('data:') ? qr : 'data:image/png;base64,' + qr}" alt="QR"></div>`;
+    else if (state === 'connecting') qrBox.innerHTML = '<p class="muted">Aguardando QR code…</p>';
+  };
+  const poll = async () => {
+    try { const s = await api(`/people/${p.id}/whatsapp/status`); render(s.state, s.qr); if (s.state === 'open' && s.phone !== p.phone) p.phone = s.phone; } catch (e) { /* ignora */ }
+  };
+  document.getElementById('connectBtn').onclick = async () => {
+    try {
+      qrBox.innerHTML = '<p class="muted">Criando instância e gerando QR…</p>';
+      const r = await api(`/people/${p.id}/whatsapp/connect`, { method: 'POST' });
+      render(r.state, r.qr);
+      stopPolling(); pollTimer = setInterval(poll, 4000);
+    } catch (e) { toast(e.message, true); qrBox.innerHTML = ''; }
+  };
+  document.getElementById('logoutBtn2').onclick = async () => { try { await api(`/people/${p.id}/whatsapp/logout`, { method: 'POST' }); toast('Desconectado'); render('close'); } catch (e) { toast(e.message, true); } };
+  document.getElementById('resetBtn').onclick = async () => { if (!confirm('Apagar a instância na Evolution e recriar? Será preciso escanear o QR de novo.')) return; try { await api(`/people/${p.id}/whatsapp/reset`, { method: 'POST' }); toast('Instância apagada. Clique em Conectar.'); render('disconnected'); } catch (e) { toast(e.message, true); } };
+  document.getElementById('webhookBtn').onclick = async () => {
+    const pre = document.getElementById('webhookInfo'); pre.hidden = false; pre.textContent = 'Consultando…';
+    try { const r = await api(`/people/${p.id}/whatsapp/webhook`); pre.textContent = `Esperado: ${r.expected}\n\nNa Evolution:\n${JSON.stringify(r.info, null, 2)}`; }
+    catch (e) { pre.textContent = 'Erro: ' + e.message + '\n\nClique de novo em "Conectar / gerar QR" para reconfigurar o webhook.'; }
+  };
+  if (p.wa_state !== 'open') { poll(); pollTimer = setInterval(poll, 5000); }
+}
+
+async function tabEmail(body, { person: p }) {
+  const { presets } = await api('/email-presets');
+  body.innerHTML = `
+    <div class="card">
+      <h2>Leitura de e-mail (IMAP)</h2>
+      <form id="emailForm">
+        <div class="field"><label><input type="checkbox" name="email_enabled" ${p.email_enabled ? 'checked' : ''} style="width:auto;margin-right:8px">Ativar leitura de e-mail</label></div>
+        <div class="field"><label>Provedor (preenche host/porta)</label>
+          <select id="preset"><option value="">— escolher —</option>${Object.entries(presets).map(([k, v]) => `<option value="${k}">${k} (${v.host})</option>`).join('')}</select>
+          <div class="hint" id="presetNote"></div></div>
+        <div class="three">
+          <div class="field"><label>Servidor IMAP</label><input name="imap_host" value="${esc(p.imap_host || '')}" placeholder="imap.gmail.com"></div>
+          <div class="field"><label>Porta</label><input name="imap_port" value="${esc(p.imap_port || 993)}"></div>
+          <div class="field"><label>Pasta</label><input name="imap_folder" value="${esc(p.imap_folder || 'INBOX')}"></div>
+        </div>
+        <div class="two">
+          <div class="field"><label>Usuário (e-mail)</label><input name="imap_user" value="${esc(p.imap_user || '')}" placeholder="pessoa@empresa.com"></div>
+          <div class="field"><label>Senha ${p.has_imap_pass ? '(salva — deixe em branco para manter)' : ''}</label><input type="password" name="imap_pass" placeholder="${p.has_imap_pass ? '••••••••' : 'senha ou senha de app'}"></div>
+        </div>
+        <div class="row"><button class="primary" type="submit">Salvar</button><button type="button" id="testEmail">Testar conexão</button><button type="button" id="pollEmail">Ler agora</button>
+          <span class="small muted">Status: ${esc(p.email_status || '—')}</span></div>
+      </form>
+      <div class="hint" style="margin-top:10px">Gmail e Outlook exigem <b>senha de app</b> (não a senha normal). A senha fica criptografada no banco. Só os e-mails novos a partir da ativação são lidos.</div>
+    </div>`;
+  const form = document.getElementById('emailForm');
+  document.getElementById('preset').onchange = (e) => {
+    const pr = presets[e.target.value]; if (!pr) return;
+    form.imap_host.value = pr.host; form.imap_port.value = pr.port; document.getElementById('presetNote').textContent = pr.note;
+  };
+  const save = async () => {
+    const b = { email_enabled: form.email_enabled.checked, imap_host: form.imap_host.value, imap_port: form.imap_port.value, imap_folder: form.imap_folder.value, imap_user: form.imap_user.value };
+    if (form.imap_pass.value) b.imap_pass = form.imap_pass.value;
+    await api(`/people/${p.id}`, { method: 'PUT', body: b });
+  };
+  form.onsubmit = async (e) => { e.preventDefault(); try { await save(); toast('Salvo'); viewPerson(p.id); } catch (err) { toast(err.message, true); } };
+  document.getElementById('testEmail').onclick = async () => { try { await save(); const r = await api(`/people/${p.id}/email/test`, { method: 'POST' }); toast(`Conectou! ${r.exists} mensagens na pasta.`); } catch (err) { toast('Falha: ' + err.message, true); } };
+  document.getElementById('pollEmail').onclick = async () => { try { await save(); const r = await api(`/people/${p.id}/email/poll`, { method: 'POST' }); toast('Leitura feita: ' + r.status); } catch (err) { toast(err.message, true); } };
+}
+
+function tabCalendar(body, { person: p, calendar }) {
+  body.innerHTML = `
+    <div class="card">
+      <h2>Agenda (link ICS)</h2>
+      <form id="calForm">
+        <div class="field"><label>URL do calendário (ICS / iCal)</label><input name="calendar_ics_url" value="${esc(p.calendar_ics_url || '')}" placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"></div>
+        <div class="row"><button class="primary" type="submit">Salvar e sincronizar</button><span class="small muted">Status: ${esc(p.calendar_status || '—')}</span></div>
+      </form>
+      <div class="hint" style="margin-top:10px"><b>Google Agenda:</b> Configurações → sua agenda → "Endereço secreto no formato iCal". <b>Outlook:</b> Configurações → Calendário → Calendários compartilhados → Publicar → link ICS. A assistente usa a agenda para detectar conflitos e montar o resumo do dia.</div>
+    </div>
+    <div class="card"><h2>Próximos 7 dias</h2>
+      ${calendar.length ? `<table><tr><th>Quando</th><th>Evento</th><th>Local</th></tr>${calendar.map((e) => `<tr><td>${e.all_day ? new Date(e.start_ts * 1000).toLocaleDateString('pt-BR') + ' (dia todo)' : fmtTs(e.start_ts)}</td><td>${esc(e.summary)}</td><td>${esc(e.location || '')}</td></tr>`).join('')}</table>` : '<div class="empty">Nenhum evento carregado.</div>'}
+    </div>`;
+  document.getElementById('calForm').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api(`/people/${p.id}`, { method: 'PUT', body: { calendar_ics_url: e.target.calendar_ics_url.value } }); const r = await api(`/people/${p.id}/calendar/sync`, { method: 'POST' }); toast(`Sincronizado: ${r.count} eventos`); viewPerson(p.id); }
+    catch (err) { toast(err.message, true); }
+  };
+}
+
+function tabPrefs(body, { person: p }) {
+  body.innerHTML = `
+    <div class="card">
+      <h2>Preferências</h2>
+      <form id="prefForm">
+        <div class="two">
+          <div class="field"><label>Nome</label><input name="name" value="${esc(p.name)}"></div>
+          <div class="field"><label>Número do WhatsApp (só dígitos, com DDI)</label><input name="phone" value="${esc(p.phone || '')}"></div>
+        </div>
+        <div class="field"><label>Contexto para a assistente</label><textarea name="context_notes">${esc(p.context_notes || '')}</textarea>
+          <div class="hint">Quanto mais contexto (quem são os clientes, o que é prioridade, como a pessoa gosta de responder), melhor a triagem e as sugestões.</div></div>
+        <div class="three">
+          <div class="field"><label>Horários dos resumos (HH:MM, separados por vírgula)</label><input name="digest_times" value="${esc(p.digest_times)}"></div>
+          <div class="field"><label>Silêncio de</label><input name="quiet_start" value="${esc(p.quiet_start || '')}" placeholder="22:00"></div>
+          <div class="field"><label>até</label><input name="quiet_end" value="${esc(p.quiet_end || '')}" placeholder="07:00"></div>
+        </div>
+        <div class="three">
+          <div class="field"><label>Avisar na hora a partir de urgência</label><select name="urgent_threshold">${[2, 3, 4].map((n) => `<option value="${n}" ${Number(p.urgent_threshold) === n ? 'selected' : ''}>${URG[n]}</option>`).join('')}</select></div>
+          <div class="field"><label>Fuso horário</label><input name="timezone" value="${esc(p.timezone)}"></div>
+          <div class="field"><label>Avisar por</label><select name="notify_mode"><option value="self" ${p.notify_mode === 'self' ? 'selected' : ''}>Conversa "Você" (próprio número)</option><option value="assistant" ${p.notify_mode === 'assistant' ? 'selected' : ''}>Número dedicado da assistente</option></select></div>
+        </div>
+        <div class="two">
+          <div class="field"><label><input type="checkbox" name="ignore_groups" ${p.ignore_groups ? 'checked' : ''} style="width:auto;margin-right:8px">Ignorar grupos de WhatsApp</label></div>
+          <div class="field"><label><input type="checkbox" name="active" ${p.active ? 'checked' : ''} style="width:auto;margin-right:8px">Assistente ativa</label></div>
+        </div>
+        <div class="row"><button class="primary" type="submit">Salvar</button><span class="grow"></span><button type="button" class="danger" id="delBtn">Excluir pessoa</button></div>
+      </form>
+    </div>`;
+  const f = document.getElementById('prefForm');
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api(`/people/${p.id}`, { method: 'PUT', body: { name: f.name.value, phone: f.phone.value, context_notes: f.context_notes.value, digest_times: f.digest_times.value, quiet_start: f.quiet_start.value, quiet_end: f.quiet_end.value, urgent_threshold: f.urgent_threshold.value, timezone: f.timezone.value, notify_mode: f.notify_mode.value, ignore_groups: f.ignore_groups.checked, active: f.active.checked } });
+      toast('Salvo'); viewPerson(p.id);
+    } catch (err) { toast(err.message, true); }
+  };
+  document.getElementById('delBtn').onclick = async () => {
+    if (!confirm(`Excluir ${p.name} e a instância do WhatsApp? Isso apaga todo o histórico.`)) return;
+    try { await api(`/people/${p.id}`, { method: 'DELETE' }); toast('Excluído'); location.hash = '#/'; } catch (err) { toast(err.message, true); }
+  };
+}
+
+function tabItems(body, { person: p, items }) {
+  const open = items.filter((i) => ['open', 'notified'].includes(i.status));
+  const closed = items.filter((i) => !['open', 'notified'].includes(i.status));
+  const card = (it) => `
+    <div class="item u${it.urgency}">
+      <div class="top"><span class="who">#${it.id} ${esc(it.contact_name)} <span class="badge">${it.channel}</span> <span class="badge ${it.urgency >= 3 ? 'warn' : ''}">${URG[it.urgency]}</span> <span class="badge">${esc(it.category || '')}</span></span><span class="small muted">${fmtTs(it.last_message_ts)} · ${esc(it.status)}</span></div>
+      <div class="sum">${esc(it.summary)}${it.deadline ? ` <b>· prazo: ${esc(it.deadline)}</b>` : ''}</div>
+      ${it.suggested_reply ? `<div class="sug">Sugestão: ${esc(it.suggested_reply)}</div>` : ''}
+      ${['open', 'notified'].includes(it.status) ? `<div class="actions">
+        ${it.suggested_reply && it.channel === 'whatsapp' ? `<button data-send="${it.id}">Enviar sugestão</button>` : ''}
+        <button data-done="${it.id}">Marcar resolvido</button><button data-dismiss="${it.id}">Ignorar</button></div>` : ''}
+    </div>`;
+  body.innerHTML = `
+    <div class="card"><h2>Pendências abertas (${open.length})</h2><div class="list">${open.length ? open.map(card).join('') : '<div class="empty">Nada pendente.</div>'}</div></div>
+    <div class="card"><h2>Histórico recente</h2><div class="list">${closed.length ? closed.slice(0, 30).map(card).join('') : '<div class="empty">—</div>'}</div></div>`;
+  body.querySelectorAll('[data-send]').forEach((b) => { b.onclick = async () => { if (!confirm('Enviar a resposta sugerida para o contato?')) return; try { await api(`/people/${p.id}/items/${b.dataset.send}/send`, { method: 'POST', body: {} }); toast('Enviado'); viewPerson(p.id); } catch (e) { toast(e.message, true); } }; });
+  body.querySelectorAll('[data-done]').forEach((b) => { b.onclick = async () => { await api(`/people/${p.id}/items/${b.dataset.done}/status`, { method: 'POST', body: { status: 'done' } }); viewPerson(p.id); }; });
+  body.querySelectorAll('[data-dismiss]').forEach((b) => { b.onclick = async () => { await api(`/people/${p.id}/items/${b.dataset.dismiss}/status`, { method: 'POST', body: { status: 'dismissed' } }); viewPerson(p.id); }; });
+}
+
+function tabChat(body, { person: p, alerts }) {
+  body.innerHTML = `
+    <div class="card"><h2>Conversa entre ${esc(p.name.split(' ')[0])} e a assistente (chat "Você" no WhatsApp)</h2>
+      <div class="chat">${alerts.length ? alerts.map((a) => `<div class="bubble ${a.kind === 'user' ? 'user' : 'assistant'}"><span class="k">${a.kind === 'user' ? esc(p.name) : 'assistente · ' + esc(a.kind)} · ${fmtTs(a.created_at)}</span>${esc(a.text)}</div>`).join('') : '<div class="empty">Nenhuma mensagem ainda. Use "Mensagem de teste" ou "Enviar resumo agora".</div>'}</div>
+    </div>`;
+  const c = body.querySelector('.chat'); if (c) c.scrollTop = c.scrollHeight;
+}
+
+function tabMessages(body, { messages }) {
+  body.innerHTML = `
+    <div class="card"><h2>Últimas mensagens lidas</h2>
+      ${messages.length ? `<table><tr><th>Quando</th><th>Canal</th><th>De / para</th><th>Texto</th></tr>${messages.map((m) => `<tr><td>${fmtTs(m.ts)}</td><td>${m.channel} ${m.direction === 'out' ? '↗' : '↙'}</td><td>${esc(m.sender_name || m.sender_id || '')}<br><span class="muted mono">${esc(m.chat_id)}</span></td><td>${m.subject ? `<b>${esc(m.subject)}</b><br>` : ''}${esc(String(m.text).slice(0, 300))}${m.triaged ? '' : ' <span class="badge info">na fila</span>'}</td></tr>`).join('')}</table>` : '<div class="empty">Nenhuma mensagem recebida ainda.</div>'}
+    </div>`;
+}
+
+// ---------- status ----------
+async function viewStatus() {
+  stopPolling();
+  const s = await api('/status');
+  $app.innerHTML = `
+    <h1>Status do sistema</h1>
+    ${s.problems.map((p) => `<div class="problem">⚠️ ${esc(p)}</div>`).join('')}
+    <div class="card"><h2>Configuração</h2>
+      <table>
+        <tr><th>URL pública (APP_URL)</th><td class="mono">${esc(s.appUrl || '— não definida —')}</td></tr>
+        <tr><th>Evolution API</th><td>${s.evolution.configured ? `<span class="mono">${esc(s.evolution.url)}</span> ${s.evolution.ok ? `<span class="badge ok">online · v${esc(s.evolution.version || '?')}</span>` : `<span class="badge bad">falhou (${esc(s.evolution.error || s.evolution.status)})</span>`}` : '<span class="badge bad">não configurada</span>'}</td></tr>
+        <tr><th>Instância assistente dedicada</th><td>${esc(s.evolution.assistantInstance || '— (usa o próprio número de cada pessoa)')}</td></tr>
+        <tr><th>Claude (IA)</th><td>${s.claude.configured ? `<span class="badge ok">configurado</span> modelo <span class="mono">${esc(s.claude.model)}</span>` : '<span class="badge bad">ANTHROPIC_API_KEY ausente</span>'}</td></tr>
+      </table>
+    </div>
+    <div class="card"><h2>Últimos webhooks recebidos da Evolution</h2>
+      ${s.lastEvents.length ? `<table><tr><th>Quando</th><th>Instância</th><th>Evento</th><th>Detalhe</th></tr>${s.lastEvents.map((e) => `<tr><td class="mono">${esc(e.at.slice(11, 19))}</td><td>${esc(e.instance)}</td><td>${esc(e.event)}</td><td class="mono">${esc([e.state, e.hasQr ? 'QR' : '', e.remoteJid, e.fromMe ? 'fromMe' : ''].filter(Boolean).join(' · '))}</td></tr>`).join('')}</table>` : '<div class="empty">Nenhum webhook recebido ainda. Se o WhatsApp está conectado e nada chega aqui, verifique APP_URL e o webhook da instância.</div>'}
+    </div>`;
+}
+
+// ---------- roteador ----------
+async function route() {
+  try {
+    const me = await api('/me');
+    if (!me.authed) return showLogin();
+  } catch { return showLogin(); }
+  $nav.hidden = false;
+  const h = location.hash || '#/';
+  document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('active', a.getAttribute('href') === h));
+  try {
+    const m = h.match(/^#\/p\/(\d+)/);
+    if (m) return await viewPerson(Number(m[1]));
+    if (h === '#/status') return await viewStatus();
+    return await viewPeople();
+  } catch (e) {
+    if (e.message !== 'não autenticado') $app.innerHTML = `<div class="card">Erro: ${esc(e.message)}</div>`;
+  }
+}
+window.addEventListener('hashchange', route);
+route();
