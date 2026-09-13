@@ -46,14 +46,63 @@ function showLogin() {
     catch (err) { toast(err.message, true); }
   };
 }
-document.getElementById('logoutBtn').onclick = async () => { await api('/logout', { method: 'POST' }); showLogin(); };
+document.getElementById('logoutBtn').onclick = async () => { stopConnPolls(); await api('/logout', { method: 'POST' }); showLogin(); };
+
+// ---------- conexões (a pessoa reconecta sozinha se cair) ----------
+function stateBadge(s) {
+  const map = { open: ['ok', 'wifi', 'Conectado'], connecting: ['warn', 'qr', 'Aguardando leitura do QR'], close: ['bad', 'wifiOff', 'Desconectado'], disconnected: ['bad', 'wifiOff', 'Não conectado'], missing: ['bad', 'alertCircle', 'Precisa reconectar'] };
+  const [cls, ic, label] = map[s] || ['', 'help', s || '—'];
+  return `<span class="badge ${cls}">${icon(ic)}${esc(label)}</span>`;
+}
+const CONN = {
+  person: { title: 'Seu WhatsApp', ic: 'phone', hint: 'É o WhatsApp que a assistente lê. Escaneie o QR com o seu celular: WhatsApp, Configurações, Aparelhos conectados, Conectar aparelho.' },
+  assistant: { title: 'Número da assistente', ic: 'bot', hint: 'É o número por onde a assistente fala com você. Escaneie o QR com o aparelho que tem o chip da assistente.' },
+};
+const connPolls = {};
+function stopConnPolls() { for (const k of Object.keys(connPolls)) { clearInterval(connPolls[k]); delete connPolls[k]; } }
+function connBlock(role, c) {
+  const R = CONN[role];
+  const bad = c.state !== 'open';
+  return `
+    <div class="item ${bad ? 'u3' : ''}" data-conn="${role}">
+      <div class="top"><span class="who">${icon(R.ic)} ${R.title} <span class="muted small">${esc(c.phone || '')}</span></span><span class="st">${stateBadge(c.state)}</span></div>
+      <div class="qrBox" style="margin:10px 0"></div>
+      <div class="actions"><button class="small ${bad ? 'primary' : ''}" data-act="connect">${icon('refresh')} ${bad ? 'Reconectar agora' : 'Gerar novo QR'}</button></div>
+      <div class="hint" style="margin-top:8px">${R.hint}</div>
+    </div>`;
+}
+function wireConn(role) {
+  const el = document.querySelector(`[data-conn="${role}"]`);
+  if (!el) return;
+  const qrBox = el.querySelector('.qrBox');
+  const render = (s) => {
+    el.querySelector('.st').innerHTML = stateBadge(s.state);
+    el.classList.toggle('u3', s.state !== 'open');
+    if (s.state === 'open') { qrBox.innerHTML = `<p class="row small">${icon('check')} Conectado. Tudo certo.</p>`; clearInterval(connPolls[role]); delete connPolls[role]; return; }
+    if (s.qr) qrBox.innerHTML = `<div class="qr"><img src="${s.qr.startsWith('data:') ? s.qr : 'data:image/png;base64,' + s.qr}" alt="QR"></div><div class="hint">O QR expira em cerca de 40 s e é renovado sozinho.</div>`;
+    else if (s.state === 'connecting') qrBox.innerHTML = '<p class="muted small">Gerando QR code…</p>';
+  };
+  const poll = async () => { try { render(await api(`/whatsapp/status?role=${role}`)); } catch { /* ignora */ } };
+  el.querySelector('[data-act="connect"]').onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      qrBox.innerHTML = '<p class="muted small">Preparando a conexão…</p>';
+      render(await api(`/whatsapp/connect?role=${role}`, { method: 'POST' }));
+      clearInterval(connPolls[role]); connPolls[role] = setInterval(poll, 4000);
+    } catch (err) { toast(err.message, true); qrBox.innerHTML = ''; }
+    e.target.disabled = false;
+  };
+  if (el.classList.contains('u3')) { clearInterval(connPolls[role]); connPolls[role] = setInterval(poll, 15000); }
+}
 
 let currentMonth = '';
 async function load(month) {
+  stopConnPolls();
   $app.innerHTML = '<div class="loading">Carregando…</div>';
-  let s;
-  try { s = await api(`/summary${month ? `?month=${month}` : ''}`); } catch (e) { if (e.message !== 'não autenticado') $app.innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
+  let s, conn;
+  try { [s, conn] = await Promise.all([api(`/summary${month ? `?month=${month}` : ''}`), api('/connections')]); } catch (e) { if (e.message !== 'não autenticado') $app.innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
   currentMonth = s.month;
+  const anyDown = conn.person.state !== 'open' || (conn.assistant && conn.assistant.state !== 'open');
   $nav.hidden = false;
   document.getElementById('who').textContent = s.person.name;
   const st = s.stats;
@@ -64,6 +113,11 @@ async function load(month) {
     <h1>Olá, ${esc(s.person.name.split(' ')[0])}
       <select id="monthSel" style="width:auto;padding:7px 12px;border-radius:999px">${s.months.map((k) => `<option value="${k}" ${k === s.month ? 'selected' : ''}>${esc(monthLabel(k))}</option>`).join('')}</select>
     </h1>
+    ${anyDown ? `<div class="problem">${icon('alert')}<span>Uma conexão da sua assistente está fora do ar. Reconecte abaixo para ela voltar a ler e avisar.</span></div>` : ''}
+    <div class="card">
+      <h2>${icon('wifi')} Conexões da assistente</h2>
+      <div class="list">${connBlock('person', conn.person)}${conn.assistant ? connBlock('assistant', conn.assistant) : ''}</div>
+    </div>
     <div class="kpis" style="margin-bottom:16px">
       <div class="kpi"><div class="v">${(st.messages.whatsapp || 0) + (st.messages.email || 0)}</div><div class="l">${icon('inbox')} mensagens lidas (${st.messages.whatsapp || 0} WhatsApp, ${st.messages.email || 0} e-mail)</div></div>
       <div class="kpi"><div class="v">${st.itemsTotal}</div><div class="l">${icon('bookmark')} pendências identificadas</div></div>
@@ -107,6 +161,7 @@ async function load(month) {
         </div>
       </div>
     </div>`;
+  wireConn('person'); if (conn.assistant) wireConn('assistant');
   document.getElementById('monthSel').onchange = (e) => load(e.target.value);
   document.getElementById('regenBtn').onclick = async (e) => {
     e.target.disabled = true; toast('Escrevendo o relatório do mês…');

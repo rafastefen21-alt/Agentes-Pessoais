@@ -6,6 +6,8 @@ import { logger } from '../logger.js';
 import * as db from '../db.js';
 import { checkPassword, clientLogin, clientLogout, clientPersonId, requireClient } from '../auth.js';
 import { monthlySummary, regenerateMonthly } from '../monthly.js';
+import { connectInstance, instanceStatus } from '../whatsapp.js';
+import { ROLES } from '../agent.js';
 
 export const clientApi = Router();
 
@@ -53,6 +55,40 @@ clientApi.get('/summary', requireClient, wrap(async (req, res) => {
   if (!person || !person.active) return res.status(401).json({ ok: false, error: 'não autenticado' });
   const s = await monthlySummary(person, String(req.query.month || ''), { autoGenerate: true });
   res.json({ ok: true, usdBrl: config.claude.usdBrl, person: { id: person.id, name: person.name }, ...s });
+}));
+
+// ---------- conexões do WhatsApp: a própria pessoa pode reconectar se cair ----------
+async function loadClient(req, res) {
+  const person = await db.getPerson(req.clientPersonId);
+  if (!person || !person.active) { res.status(401).json({ ok: false, error: 'não autenticado' }); return null; }
+  return person;
+}
+function roleOf(req, person) {
+  if (req.query.role === 'assistant') {
+    if (person.notify_mode !== 'assistant') throw Object.assign(new Error('Esta conta não usa número de assistente'), { status: 400 });
+    return ROLES.assistant;
+  }
+  return ROLES.person;
+}
+const publicConn = (person, cols) => ({ state: person[cols.state], phone: person[cols.phone] || '' });
+
+clientApi.get('/connections', requireClient, wrap(async (req, res) => {
+  const person = await loadClient(req, res); if (!person) return;
+  res.json({
+    ok: true,
+    person: publicConn(person, ROLES.person),
+    assistant: person.notify_mode === 'assistant' ? publicConn(person, ROLES.assistant) : null,
+  });
+}));
+clientApi.get('/whatsapp/status', requireClient, wrap(async (req, res) => {
+  const person = await loadClient(req, res); if (!person) return;
+  res.json({ ok: true, ...(await instanceStatus(person, roleOf(req, person))) });
+}));
+clientApi.post('/whatsapp/connect', requireClient, wrap(async (req, res) => {
+  const person = await loadClient(req, res); if (!person) return;
+  const cols = roleOf(req, person);
+  logger.info('Cliente pediu reconexão', { person: person.name, role: req.query.role || 'person' });
+  res.json({ ok: true, ...(await connectInstance(person, cols)) });
 }));
 
 clientApi.post('/summary/regenerate', requireClient, wrap(async (req, res) => {

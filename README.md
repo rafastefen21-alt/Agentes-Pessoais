@@ -102,6 +102,8 @@ Se preferir não usar um chip extra para alguma pessoa, em Preferências escolha
 
 Cada pessoa pode ter um login próprio em `APP_URL/cliente` (e-mail e senha definidos pelo admin em **Preferências → Acesso do cliente**). Lá ela vê só os próprios dados: gasto com IA no mês, números do mês (mensagens lidas, pendências, urgentes, resolvidas), o relatório do mês escrito pela assistente (resumo, principais pontos, agenda e recomendações) e a agenda. O relatório é gerado na primeira visita ao mês e fica em cache; o botão "Atualizar" regera no máximo a cada 6 h. O admin vê o mesmo relatório na aba **Relatório mensal** da pessoa.
 
+No topo do painel a pessoa vê as duas conexões (o WhatsApp dela e o número da assistente). Se alguma cair, ela clica em **Reconectar agora**, escaneia o QR e volta a funcionar sem depender do admin. O cliente só pode conectar; recriar instância, desconectar e webhook continuam só no portal do admin.
+
 ## Design
 
 Portal e área do cliente seguem o material Liquid Glass (Apple): barra e controles translúcidos com blur sobre um fundo colorido, conteúdo em superfícies mais opacas, formas em cápsula, tinta só na ação primária, claro/escuro automático. Sem emojis: ícones de linha em `public/icons.js`.
