@@ -3,22 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Assistentes — Portal</title>
+  <title>Minha assistente</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="backdrop" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
   <header class="topbar">
-    <div class="brand"><span class="mark" id="brandMark"></span>Assistentes</div>
+    <div class="brand"><span class="mark" id="brandMark"></span>Minha assistente</div>
     <nav id="nav" hidden>
-      <a href="#/" data-nav data-icon="users">Pessoas</a>
-      <a href="#/status" data-nav data-icon="activity">Status</a>
+      <span class="small muted" id="who"></span>
       <button class="link" id="logoutBtn" data-icon="logout">Sair</button>
     </nav>
   </header>
   <main id="app"><div class="loading">Carregando…</div></main>
   <div id="toast" class="toast" hidden></div>
   <script src="icons.js"></script>
-  <script src="app.js"></script>
+  <script src="cliente.js"></script>
 </body>
 </html>

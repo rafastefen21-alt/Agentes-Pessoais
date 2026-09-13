@@ -54,7 +54,7 @@ export const config = {
     // Intervalo (ms) de atualização da agenda (ICS)
     calendarPollMs: num(process.env.CALENDAR_POLL_MS, 900000),
     // Marca que identifica mensagens escritas pelo assistente no chat "Você"
-    marker: process.env.ASSISTANT_MARKER || '🤖',
+    marker: process.env.ASSISTANT_MARKER || '[Assistente]',
     // Ignorar grupos de WhatsApp por padrão (configurável por pessoa)
     ignoreGroupsDefault: bool(process.env.IGNORE_GROUPS_DEFAULT, true),
   },

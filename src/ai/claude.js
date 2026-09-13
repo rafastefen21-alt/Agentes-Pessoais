@@ -27,7 +27,7 @@ Princípios:
 - Nunca invente fatos: se a informação não está nas mensagens, diga que não está.
 - Urgência é sobre consequência e prazo, não sobre volume ou tom da mensagem. Cobranças com prazo, clientes esperando resposta, pedidos de decisão, problemas em andamento, compromissos hoje/amanhã e pessoas próximas com necessidade real são urgentes. Propaganda, newsletters, notificações automáticas, grupos de conversa fiada e "bom dia" não são.
 - Ao sugerir respostas, escreva como a própria pessoa escreveria para aquele contato (curta, direta, cordial), pronta para copiar e enviar. Nunca prometa nada que a pessoa não confirmou.
-- Formato para WhatsApp: use *negrito* para destacar e listas com "-". Nada de markdown com # ou tabelas. Emojis com moderação (no máximo um por bloco).`;
+- Formato para WhatsApp: use *negrito* para destacar e listas com "-". Nada de markdown com # ou tabelas. Não use emojis.`;
 
 const TriageSchema = z.object({
   contact_name: z.string().describe('Nome do contato/remetente como aparece ou como se deduz da conversa'),
@@ -201,6 +201,38 @@ export async function digest({ person, items, calendar, stats, sinceLabel }) {
     meta: { personId: person.id, kind: 'resumo' },
   });
   return text;
+}
+
+// ---------- relatório mensal (área do cliente) ----------
+const MonthlySchema = z.object({
+  resumo: z.string().describe('2 a 4 frases sobre como foi o mês: volume, o que dominou a atenção, o que ficou resolvido.'),
+  destaques: z.array(z.string()).describe('Os 3 a 8 pontos mais importantes do mês, um por item, concretos (nomes, valores, prazos).'),
+  agenda: z.array(z.string()).describe('Compromissos e prazos relevantes do mês e os que vêm a seguir, um por item.'),
+  recomendacoes: z.array(z.string()).describe('Até 4 sugestões práticas para o próximo mês (o que responder, o que cobrar, o que agendar).'),
+});
+export async function monthlyReport({ person, monthLabel, stats, items, events, usage }) {
+  const list = items.length
+    ? items.map((it) => `- [${URGENCY_LABEL[it.urgency]}] (${it.channel}) ${it.contact_name}: ${it.summary}${it.deadline ? ` — prazo: ${it.deadline}` : ''} — status: ${it.status}`).join('\n')
+    : '(nenhuma pendência registrada)';
+  const user = [
+    personBlock(person),
+    `\n## Mês: ${monthLabel}`,
+    `Mensagens lidas: WhatsApp ${stats.messages?.whatsapp || 0}, e-mail ${stats.messages?.email || 0}, de ${stats.contacts} contatos.`,
+    `Pendências identificadas: ${stats.itemsTotal} (urgentes: ${stats.urgent}; respondidas: ${stats.items?.replied || 0}; resolvidas: ${stats.items?.done || 0}; ainda abertas: ${(stats.items?.open || 0) + (stats.items?.notified || 0)}).`,
+    `Avisos enviados pela assistente: urgentes ${stats.alerts?.urgent || 0}, resumos ${stats.alerts?.digest || 0}, conversas ${stats.alerts?.chat || 0}.`,
+    `\n## Pendências do mês\n${list}`,
+    `\n## Agenda do mês\n${events || '(nenhum evento)'}`,
+    `\nEscreva o relatório do mês para ${person.name.split(' ')[0]} ler no portal. Texto simples, sem emojis, sem markdown. Responda no formato JSON pedido.`,
+  ].join('\n');
+  const { text } = await callClaude({
+    system: SYSTEM_BASE + '\n\nSua tarefa agora é escrever o RELATÓRIO MENSAL da pessoa e devolver um JSON.',
+    messages: [{ role: 'user', content: user }],
+    format: zodOutputFormat(MonthlySchema),
+    effort: config.claude.digestEffort,
+    maxTokens: 3000,
+    meta: { personId: person.id, kind: 'relatorio_mensal' },
+  });
+  return parseJson(text, MonthlySchema);
 }
 
 // ---------- conversa com o assistente ----------

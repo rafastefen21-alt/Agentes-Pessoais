@@ -98,6 +98,14 @@ Cada pessoa tem **duas instâncias** na Evolution: o WhatsApp dela (só leitura,
 
 Se preferir não usar um chip extra para alguma pessoa, em Preferências escolha "Avisar por: conversa Você" — a assistente passa a escrever na conversa da pessoa com ela mesma, marcando as mensagens com 🤖.
 
+## Área do cliente ("Minha assistente")
+
+Cada pessoa pode ter um login próprio em `APP_URL/cliente` (e-mail e senha definidos pelo admin em **Preferências → Acesso do cliente**). Lá ela vê só os próprios dados: gasto com IA no mês, números do mês (mensagens lidas, pendências, urgentes, resolvidas), o relatório do mês escrito pela assistente (resumo, principais pontos, agenda e recomendações) e a agenda. O relatório é gerado na primeira visita ao mês e fica em cache; o botão "Atualizar" regera no máximo a cada 6 h. O admin vê o mesmo relatório na aba **Relatório mensal** da pessoa.
+
+## Design
+
+Portal e área do cliente seguem o material Liquid Glass (Apple): barra e controles translúcidos com blur sobre um fundo colorido, conteúdo em superfícies mais opacas, formas em cápsula, tinta só na ação primária, claro/escuro automático. Sem emojis: ícones de linha em `public/icons.js`.
+
 ## Custos e privacidade
 
 - Cada conversa com mensagens novas gera uma chamada ao Claude (com cache do prompt). Ajuste `CLAUDE_TRIAGE_EFFORT` para `low` se quiser reduzir custo.

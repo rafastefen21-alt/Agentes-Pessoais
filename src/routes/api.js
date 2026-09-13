@@ -6,6 +6,8 @@ import * as db from '../db.js';
 import * as evo from '../evolution.js';
 import * as email from '../email.js';
 import { encrypt } from '../crypto.js';
+import { hashPassword } from '../auth.js';
+import { monthlySummary, regenerateMonthly } from '../monthly.js';
 import { syncCalendar, upcomingEvents } from '../calendar.js';
 import { claudeConfigured } from '../ai/claude.js';
 import { notifyPerson, sendDigest, pollEmail, ROLES } from '../agent.js';
@@ -23,8 +25,8 @@ function slug(s) {
 }
 function publicPerson(p) {
   if (!p) return p;
-  const { imap_pass, wa_qr, assistant_qr, ...rest } = p;
-  return { ...rest, has_imap_pass: Boolean(imap_pass), has_qr: Boolean(wa_qr), has_assistant_qr: Boolean(assistant_qr) };
+  const { imap_pass, wa_qr, assistant_qr, login_pass, ...rest } = p;
+  return { ...rest, has_imap_pass: Boolean(imap_pass), has_qr: Boolean(wa_qr), has_assistant_qr: Boolean(assistant_qr), has_login: Boolean(login_pass) };
 }
 /** ?role=person (WhatsApp da pessoa) ou ?role=assistant (número da assistente). */
 function roleOf(req) {
@@ -154,6 +156,35 @@ api.delete('/people/:id', wrap(async (req, res) => {
   }
   await db.deletePerson(p.id);
   res.json({ ok: true });
+}));
+
+// ---------- acesso do cliente à área "Minha assistente" ----------
+api.put('/people/:id/client-access', wrap(async (req, res) => {
+  const p = await loadPerson(req, res); if (!p) return;
+  const b = req.body || {};
+  const fields = {};
+  if (b.login_email !== undefined) fields.login_email = String(b.login_email || '').trim().toLowerCase() || null;
+  if (b.password) {
+    if (String(b.password).length < 6) return res.status(400).json({ ok: false, error: 'Senha muito curta (mínimo 6 caracteres)' });
+    fields.login_pass = hashPassword(b.password);
+  }
+  if (b.revoke) { fields.login_pass = null; }
+  if (fields.login_email) {
+    const other = await db.getPersonByLoginEmail(fields.login_email);
+    if (other && other.id !== p.id) return res.status(400).json({ ok: false, error: 'Este e-mail já está em uso por outra pessoa' });
+  }
+  await db.setPersonFields(p.id, fields);
+  res.json({ ok: true, person: publicPerson(await db.getPerson(p.id)) });
+}));
+
+// ---------- relatório mensal (visão do admin) ----------
+api.get('/people/:id/monthly', wrap(async (req, res) => {
+  const p = await loadPerson(req, res); if (!p) return;
+  res.json({ ok: true, usdBrl: config.claude.usdBrl, ...(await monthlySummary(p, String(req.query.month || ''))) });
+}));
+api.post('/people/:id/monthly/regenerate', wrap(async (req, res) => {
+  const p = await loadPerson(req, res); if (!p) return;
+  res.json({ ok: true, report: await regenerateMonthly(p, String(req.query.month || '')) });
 }));
 
 // ---------- WhatsApp ----------

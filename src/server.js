@@ -6,6 +6,7 @@ import { config, validateConfig } from './config.js';
 import { logger } from './logger.js';
 import { login, logout, requireAuth, isAuthed } from './auth.js';
 import { api } from './routes/api.js';
+import { clientApi } from './routes/client.js';
 import { webhooks } from './routes/webhooks.js';
 import { startSchedulers } from './agent.js';
 import { init as initDb } from './db.js';
@@ -23,7 +24,9 @@ app.use('/webhooks', webhooks);
 app.post('/api/login', login);
 app.post('/api/logout', logout);
 app.get('/api/me', (req, res) => res.json({ ok: true, authed: isAuthed(req) }));
+app.use('/api/client', clientApi);
 app.use('/api', requireAuth, api);
+app.get('/cliente', (req, res) => res.sendFile(path.join(here, '..', 'public', 'cliente.html')));
 
 // Portal
 app.use(express.static(path.join(here, '..', 'public')));

@@ -37,7 +37,7 @@ async function calendarText(person) {
  * Manda uma mensagem da assistente para a pessoa.
  *  - modo "assistant": sai do número da assistente daquela pessoa (instância própria).
  *    Se esse número estiver desconectado ou o envio falhar, cai para a conversa "Você".
- *  - modo "self": escreve na conversa "Você" do WhatsApp da própria pessoa, com o marcador 🤖.
+ *  - modo "self": escreve na conversa "Você" do WhatsApp da própria pessoa, com o marcador (ASSISTANT_MARKER).
  */
 export async function notifyPerson(person, text, kind = 'chat') {
   if (!person.phone) throw new Error('Número do WhatsApp da pessoa ainda não conhecido (conecte o WhatsApp dela primeiro)');
@@ -230,7 +230,7 @@ async function runTriage(personId, channel, chatId, opts) {
   const shouldNotify = result.notify_now && result.urgency_level >= Number(person.urgent_threshold || 3);
   if (shouldNotify && !inQuietHours(person)) {
     const lines = [
-      `*${result.urgency_level >= 4 ? '🚨 Urgente' : '⚠️ Atenção'}* — ${result.contact_name} (${channel === 'email' ? 'e-mail' : 'WhatsApp'})`,
+      `*${result.urgency_level >= 4 ? 'URGENTE' : 'Atenção'}* — ${result.contact_name} (${channel === 'email' ? 'e-mail' : 'WhatsApp'})`,
       result.summary,
       result.deadline ? `Prazo: ${result.deadline}` : null,
       result.calendar_conflict ? `Agenda: ${result.calendar_conflict}` : null,
@@ -306,7 +306,7 @@ async function handleUserCommand(person, text) {
     const item = await db.getItem(Number(doneMatch[2]));
     if (!item || item.person_id !== person.id) return notifyPerson(person, 'Não achei essa pendência.');
     await db.setItemStatus(item.id, 'done');
-    return notifyPerson(person, `Ok, #${item.id} (${item.contact_name}) marcado como resolvido. ✅`);
+    return notifyPerson(person, `Ok, #${item.id} (${item.contact_name}) marcado como resolvido.`);
   }
 
   // Conversa livre com a IA
@@ -320,7 +320,7 @@ async function handleUserCommand(person, text) {
     if (item && item.person_id !== person.id) continue;
     if (a.type === 'send_reply' && item && a.text) {
       await sendReplyToContact(person, item, a.text, { silent: true });
-      reply += `\n\n✅ Enviado para ${item.contact_name}.`;
+      reply += `\n\nEnviado para ${item.contact_name}.`;
     } else if (a.type === 'propose_reply' && item && a.text) {
       await db.kvSet(`draft:${person.id}:${item.id}`, a.text);
       await db.kvSet(`pending:${person.id}`, String(item.id));
@@ -346,7 +346,7 @@ async function sendReplyToContact(person, item, text, { silent = false } = {}) {
   });
   await db.setItemStatus(item.id, 'replied');
   await db.kvSet(`draft:${person.id}:${item.id}`, '');
-  if (!silent) await notifyPerson(person, `✅ Enviado para ${item.contact_name}:\n"${text}"`);
+  if (!silent) await notifyPerson(person, `Enviado para ${item.contact_name}:\n"${text}"`);
   return r;
 }
 

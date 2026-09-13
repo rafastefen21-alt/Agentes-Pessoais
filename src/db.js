@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS people (
   assistant_qr TEXT,
   assistant_qr_at BIGINT,
   assistant_phone TEXT DEFAULT '',
+  login_email TEXT,
+  login_pass TEXT,
   notify_mode TEXT NOT NULL DEFAULT 'assistant',
   ignore_groups INTEGER NOT NULL DEFAULT 1,
   email_enabled INTEGER NOT NULL DEFAULT 0,
@@ -130,6 +132,8 @@ const MIGRATIONS = [
   'ALTER TABLE people ADD COLUMN assistant_qr TEXT',
   'ALTER TABLE people ADD COLUMN assistant_qr_at BIGINT',
   "ALTER TABLE people ADD COLUMN assistant_phone TEXT DEFAULT ''",
+  'ALTER TABLE people ADD COLUMN login_email TEXT',
+  'ALTER TABLE people ADD COLUMN login_pass TEXT',
 ];
 const isDuplicateColumn = (e) => /duplicate column|already exists/i.test(String(e.message));
 
@@ -256,6 +260,9 @@ export function listPeople() {
 export function getPerson(id) {
   return get('SELECT * FROM people WHERE id = $1', [id]);
 }
+export function getPersonByLoginEmail(email) {
+  return get('SELECT * FROM people WHERE LOWER(login_email) = LOWER($1)', [email]);
+}
 /** Acha a pessoa por qualquer uma das duas instâncias (a dela ou a da assistente). */
 export function getPersonByInstance(instance) {
   return get('SELECT * FROM people WHERE instance_name = $1 OR assistant_instance_name = $2', [instance, instance]);
@@ -375,6 +382,28 @@ export async function replaceCalendarEvents(personId, events) {
 export function calendarEventsBetween(personId, fromTs, toTs) {
   return all(`SELECT * FROM calendar_events WHERE person_id = $1 AND start_ts < $2 AND COALESCE(end_ts, start_ts) >= $3 ORDER BY start_ts`,
     [personId, toTs, fromTs]);
+}
+
+// ---------- consultas por período (relatório mensal / área do cliente) ----------
+export async function itemsBetween(personId, fromTs, toTs, limit = 200) {
+  return all(`SELECT * FROM items WHERE person_id = $1 AND created_at >= $2 AND created_at < $3
+    ORDER BY urgency DESC, created_at DESC LIMIT $4`, [personId, fromTs, toTs, limit]);
+}
+export async function periodStats(personId, fromTs, toTs) {
+  const msgs = await all(`SELECT channel, COUNT(*) AS c FROM messages WHERE person_id = $1 AND ts >= $2 AND ts < $3 AND direction = 'in' GROUP BY channel`, [personId, fromTs, toTs]);
+  const contacts = await get(`SELECT COUNT(DISTINCT chat_id) AS c FROM messages WHERE person_id = $1 AND ts >= $2 AND ts < $3 AND direction = 'in'`, [personId, fromTs, toTs]);
+  const items = await all(`SELECT status, COUNT(*) AS c FROM items WHERE person_id = $1 AND created_at >= $2 AND created_at < $3 GROUP BY status`, [personId, fromTs, toTs]);
+  const urgent = await get(`SELECT COUNT(*) AS c FROM items WHERE person_id = $1 AND created_at >= $2 AND created_at < $3 AND urgency >= 3`, [personId, fromTs, toTs]);
+  const alerts = await all(`SELECT kind, COUNT(*) AS c FROM alerts WHERE person_id = $1 AND created_at >= $2 AND created_at < $3 GROUP BY kind`, [personId, fromTs, toTs]);
+  const n = (v) => Number(v || 0);
+  return {
+    messages: Object.fromEntries(msgs.map((m) => [m.channel, n(m.c)])),
+    contacts: n(contacts?.c),
+    items: Object.fromEntries(items.map((i) => [i.status, n(i.c)])),
+    itemsTotal: items.reduce((a, i) => a + n(i.c), 0),
+    urgent: n(urgent?.c),
+    alerts: Object.fromEntries(alerts.map((a) => [a.kind, n(a.c)])),
+  };
 }
 
 // ---------- uso da API (custos) ----------
