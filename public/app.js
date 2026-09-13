@@ -34,7 +34,7 @@ function money(usd, rate) {
   return rate ? `${us} (R$ ${(v * rate).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : us;
 }
 function tokens(n) { return Number(n || 0).toLocaleString('pt-BR'); }
-function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } if (typeof stopWaPolls === 'function') stopWaPolls(); }
 
 // ---------- login ----------
 function showLogin() {
@@ -64,8 +64,9 @@ async function viewPeople() {
   const { people, usdBrl } = await api('/people');
   const cards = people.map((p) => `
     <div class="card person-card" onclick="location.hash='#/p/${p.id}'">
-      <div class="row"><span class="name grow">${esc(p.name)}</span>${stateBadge(p.wa_state)}${p.active ? '' : '<span class="badge bad">pausado</span>'}</div>
-      <div class="meta">📱 ${esc(p.phone || 'número ainda não detectado')} ${p.email_enabled ? ' · ✉️ ' + esc(p.imap_user) : ''}${p.calendar_ics_url ? ' · 📅 agenda' : ''}</div>
+      <div class="row"><span class="name grow">${esc(p.name)}</span>${p.active ? '' : '<span class="badge bad">pausado</span>'}</div>
+      <div class="meta">📱 Pessoa: ${stateBadge(p.wa_state)} ${esc(p.phone || '')}${p.notify_mode === 'assistant' ? `<br>🤖 Assistente: ${stateBadge(p.assistant_state)} ${esc(p.assistant_phone || '')}` : '<br>🤖 Avisos pela conversa "Você"'}</div>
+      <div class="meta">${p.email_enabled ? '✉️ ' + esc(p.imap_user) : '✉️ e-mail não configurado'}${p.calendar_ics_url ? ' · 📅 agenda' : ''}</div>
       <div class="stats">
         <span>24h: <b>${p.stats.last24h.whatsapp || 0}</b> WhatsApp · <b>${p.stats.last24h.email || 0}</b> e-mails</span>
         <span>Pendências: <b>${p.stats.openItems}</b> (<b>${p.stats.urgentItems}</b> urgentes)</span>
@@ -115,7 +116,7 @@ async function viewPerson(id) {
   $app.innerHTML = `
     <div class="row" style="margin-bottom:12px">
       <a href="#/">← Pessoas</a>
-      <h1 class="grow" style="margin:0">${esc(p.name)} ${stateBadge(p.wa_state)}</h1>
+      <h1 class="grow" style="margin:0">${esc(p.name)} <span class="small muted">pessoa</span> ${stateBadge(p.wa_state)}${p.notify_mode === 'assistant' ? ` <span class="small muted">assistente</span> ${stateBadge(p.assistant_state)}` : ''}</h1>
       <button id="digestBtn">Enviar resumo agora</button>
       <button id="testBtn">Mensagem de teste</button>
     </div>
@@ -146,57 +147,87 @@ async function tabUsage(body, { person: p }) {
     </div>`;
 }
 
-function tabWhatsApp(body, { person: p }) {
-  body.innerHTML = `
-    <div class="card">
-      <h2>Conexão do WhatsApp</h2>
-      <p class="small muted">Instância na Evolution: <span class="mono">${esc(p.instance_name)}</span> · Número: <b>${esc(p.phone || 'não detectado')}</b></p>
-      <div id="waStatus">${stateBadge(p.wa_state)}</div>
-      <div id="qrBox" style="margin:14px 0"></div>
+// Duas conexões por pessoa: o WhatsApp dela (leitura) e o número da assistente (conversa com ela).
+const WA_ROLES = {
+  person: { title: '1. WhatsApp da pessoa (leitura)', inst: 'instance_name', state: 'wa_state', phone: 'phone',
+    hint: 'É o WhatsApp que a assistente vai ler. Escaneie com o celular da própria pessoa: WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho.',
+    done: '✅ Conectado. A assistente já está lendo as mensagens desta pessoa.' },
+  assistant: { title: '2. Número da assistente (conversa com a pessoa)', inst: 'assistant_instance_name', state: 'assistant_state', phone: 'assistant_phone',
+    hint: 'Um chip/número exclusivo desta pessoa, de onde a assistente escreve e recebe os comandos. Escaneie com o aparelho que tem esse chip. Se cair, os avisos passam a ir pela conversa "Você" do próprio WhatsApp da pessoa até reconectar.',
+    done: '✅ Conectado. A assistente fala com a pessoa por este número. Peça para ela salvar o contato.' },
+};
+const pollTimers = {};
+function stopWaPolls() { for (const k of Object.keys(pollTimers)) { clearInterval(pollTimers[k]); delete pollTimers[k]; } }
+
+function waBlock(p, role) {
+  const R = WA_ROLES[role];
+  return `
+    <div class="card" data-role="${role}">
+      <h2>${R.title}</h2>
+      <p class="small muted">Instância: <span class="mono">${esc(p[R.inst] || '—')}</span> · Número: <b class="phone">${esc(p[R.phone] || 'não detectado')}</b></p>
+      <div class="waStatus">${stateBadge(p[R.state])}</div>
+      <div class="qrBox" style="margin:14px 0"></div>
       <div class="row">
-        <button class="primary" id="connectBtn">Conectar / gerar QR</button>
-        <button id="logoutBtn2">Desconectar</button>
-        <button class="danger" id="resetBtn">Recriar instância</button>
-        <button id="webhookBtn">Verificar webhook</button>
+        <button class="primary" data-act="connect">Conectar / gerar QR</button>
+        <button data-act="logout">Desconectar</button>
+        <button class="danger" data-act="reset">Recriar instância</button>
+        <button data-act="webhook">Verificar webhook</button>
       </div>
-      <div class="hint" style="margin-top:10px">No celular: WhatsApp → Configurações → Aparelhos conectados → Conectar aparelho → escaneie o QR. O QR expira em ~40 s e é renovado automaticamente aqui.</div>
-      <pre id="webhookInfo" class="pre mono" hidden></pre>
-    </div>
-    <div class="card">
-      <h2>Como funciona</h2>
-      <ul class="small muted">
-        <li>A assistente lê as mensagens que chegam neste WhatsApp e classifica a urgência com IA.</li>
-        <li>Quando algo é urgente, ela avisa na conversa <b>"Você"</b> (mensagem para o próprio número), com resumo e sugestão de resposta.</li>
-        <li>A pessoa pode responder nessa mesma conversa: <i>enviar #12</i>, <i>resumo</i>, <i>agenda</i>, <i>feito #12</i> ou falar livremente ("responde pro João que amanhã às 10h").</li>
-        <li>Resumos periódicos nos horários configurados em Preferências.</li>
-      </ul>
+      <div class="hint" style="margin-top:10px">${R.hint} O QR expira em ~40 s e é renovado automaticamente aqui.</div>
+      <pre class="pre mono webhookInfo" hidden></pre>
     </div>`;
-  const qrBox = document.getElementById('qrBox');
-  const render = (state, qr) => {
-    document.getElementById('waStatus').innerHTML = stateBadge(state);
-    if (state === 'open') { qrBox.innerHTML = '<p>✅ WhatsApp conectado. A assistente já está lendo as mensagens.</p>'; stopPolling(); return; }
+}
+
+function wireWaBlock(p, role) {
+  const R = WA_ROLES[role];
+  const el = document.querySelector(`[data-role="${role}"]`);
+  const qrBox = el.querySelector('.qrBox');
+  const q = `?role=${role}`;
+  const render = (state, qr, phone) => {
+    el.querySelector('.waStatus').innerHTML = stateBadge(state);
+    if (phone) el.querySelector('.phone').textContent = phone;
+    if (state === 'open') { qrBox.innerHTML = `<p>${R.done}</p>`; clearInterval(pollTimers[role]); delete pollTimers[role]; return; }
     if (qr) qrBox.innerHTML = `<div class="qr"><img src="${qr.startsWith('data:') ? qr : 'data:image/png;base64,' + qr}" alt="QR"></div>`;
     else if (state === 'connecting') qrBox.innerHTML = '<p class="muted">Aguardando QR code…</p>';
   };
   const poll = async () => {
-    try { const s = await api(`/people/${p.id}/whatsapp/status`); render(s.state, s.qr); if (s.state === 'open' && s.phone !== p.phone) p.phone = s.phone; } catch (e) { /* ignora */ }
+    try { const s = await api(`/people/${p.id}/whatsapp/status${q}`); render(s.state, s.qr, s.phone); } catch (e) { /* ignora */ }
   };
-  document.getElementById('connectBtn').onclick = async () => {
+  const startPoll = (ms) => { clearInterval(pollTimers[role]); pollTimers[role] = setInterval(poll, ms); };
+  el.querySelector('[data-act="connect"]').onclick = async () => {
     try {
       qrBox.innerHTML = '<p class="muted">Criando instância e gerando QR…</p>';
-      const r = await api(`/people/${p.id}/whatsapp/connect`, { method: 'POST' });
+      const r = await api(`/people/${p.id}/whatsapp/connect${q}`, { method: 'POST' });
       render(r.state, r.qr);
-      stopPolling(); pollTimer = setInterval(poll, 4000);
+      startPoll(4000);
     } catch (e) { toast(e.message, true); qrBox.innerHTML = ''; }
   };
-  document.getElementById('logoutBtn2').onclick = async () => { try { await api(`/people/${p.id}/whatsapp/logout`, { method: 'POST' }); toast('Desconectado'); render('close'); } catch (e) { toast(e.message, true); } };
-  document.getElementById('resetBtn').onclick = async () => { if (!confirm('Apagar a instância na Evolution e recriar? Será preciso escanear o QR de novo.')) return; try { await api(`/people/${p.id}/whatsapp/reset`, { method: 'POST' }); toast('Instância apagada. Clique em Conectar.'); render('disconnected'); } catch (e) { toast(e.message, true); } };
-  document.getElementById('webhookBtn').onclick = async () => {
-    const pre = document.getElementById('webhookInfo'); pre.hidden = false; pre.textContent = 'Consultando…';
-    try { const r = await api(`/people/${p.id}/whatsapp/webhook`); pre.textContent = `Esperado: ${r.expected}\n\nNa Evolution:\n${JSON.stringify(r.info, null, 2)}`; }
+  el.querySelector('[data-act="logout"]').onclick = async () => { try { await api(`/people/${p.id}/whatsapp/logout${q}`, { method: 'POST' }); toast('Desconectado'); render('close'); } catch (e) { toast(e.message, true); } };
+  el.querySelector('[data-act="reset"]').onclick = async () => { if (!confirm('Apagar esta instância na Evolution e recriar? Será preciso escanear o QR de novo.')) return; try { await api(`/people/${p.id}/whatsapp/reset${q}`, { method: 'POST' }); toast('Instância apagada. Clique em Conectar.'); render('disconnected'); } catch (e) { toast(e.message, true); } };
+  el.querySelector('[data-act="webhook"]').onclick = async () => {
+    const pre = el.querySelector('.webhookInfo'); pre.hidden = false; pre.textContent = 'Consultando…';
+    try { const r = await api(`/people/${p.id}/whatsapp/webhook${q}`); pre.textContent = `Esperado: ${r.expected}\n\nNa Evolution:\n${JSON.stringify(r.info, null, 2)}`; }
     catch (e) { pre.textContent = 'Erro: ' + e.message + '\n\nClique de novo em "Conectar / gerar QR" para reconfigurar o webhook.'; }
   };
-  if (p.wa_state !== 'open') { poll(); pollTimer = setInterval(poll, 5000); }
+  if (p[R.state] !== 'open' && p[R.state] !== 'disconnected') { poll(); startPoll(5000); }
+}
+
+function tabWhatsApp(body, { person: p }) {
+  stopWaPolls();
+  body.innerHTML = `
+    ${waBlock(p, 'person')}
+    ${p.notify_mode === 'assistant' ? waBlock(p, 'assistant') : '<div class="card"><h2>2. Número da assistente</h2><p class="small muted">Esta pessoa está configurada para receber os avisos na conversa "Você" do próprio WhatsApp. Para usar um número dedicado da assistente, mude "Avisar por" em Preferências.</p></div>'}
+    <div class="card">
+      <h2>Como funciona</h2>
+      <ul class="small muted">
+        <li>A assistente lê as mensagens que chegam no WhatsApp da pessoa (1) e classifica a urgência com IA.</li>
+        <li>Quando algo é urgente, ela avisa pelo número da assistente (2), com resumo e sugestão de resposta.</li>
+        <li>A pessoa responde nessa conversa: <i>enviar #12</i>, <i>resumo</i>, <i>agenda</i>, <i>feito #12</i> ou fala livremente ("responde pro João que amanhã às 10h"). As respostas aos contatos saem do WhatsApp da própria pessoa (1).</li>
+        <li>Resumos periódicos nos horários configurados em Preferências.</li>
+      </ul>
+    </div>`;
+  wireWaBlock(p, 'person');
+  if (p.notify_mode === 'assistant') wireWaBlock(p, 'assistant');
 }
 
 async function tabEmail(body, { person: p }) {
@@ -277,7 +308,7 @@ function tabPrefs(body, { person: p }) {
         <div class="three">
           <div class="field"><label>Avisar na hora a partir de urgência</label><select name="urgent_threshold">${[2, 3, 4].map((n) => `<option value="${n}" ${Number(p.urgent_threshold) === n ? 'selected' : ''}>${URG[n]}</option>`).join('')}</select></div>
           <div class="field"><label>Fuso horário</label><input name="timezone" value="${esc(p.timezone)}"></div>
-          <div class="field"><label>Avisar por</label><select name="notify_mode"><option value="self" ${p.notify_mode === 'self' ? 'selected' : ''}>Conversa "Você" (próprio número)</option><option value="assistant" ${p.notify_mode === 'assistant' ? 'selected' : ''}>Número dedicado da assistente</option></select></div>
+          <div class="field"><label>Avisar por</label><select name="notify_mode"><option value="assistant" ${p.notify_mode === 'assistant' ? 'selected' : ''}>Número próprio da assistente (recomendado)</option><option value="self" ${p.notify_mode === 'self' ? 'selected' : ''}>Conversa "Você" (próprio número da pessoa)</option></select></div>
         </div>
         <div class="two">
           <div class="field"><label><input type="checkbox" name="ignore_groups" ${p.ignore_groups ? 'checked' : ''} style="width:auto;margin-right:8px">Ignorar grupos de WhatsApp</label></div>
@@ -351,7 +382,6 @@ async function viewStatus() {
       <table>
         <tr><th>URL pública (APP_URL)</th><td class="mono">${esc(s.appUrl || '— não definida —')}</td></tr>
         <tr><th>Evolution API</th><td>${s.evolution.configured ? `<span class="mono">${esc(s.evolution.url)}</span> ${s.evolution.ok ? `<span class="badge ok">online · v${esc(s.evolution.version || '?')}</span>` : `<span class="badge bad">falhou (${esc(s.evolution.error || s.evolution.status)})</span>`}` : '<span class="badge bad">não configurada</span>'}</td></tr>
-        <tr><th>Instância assistente dedicada</th><td>${esc(s.evolution.assistantInstance || '— (usa o próprio número de cada pessoa)')}</td></tr>
         <tr><th>Claude (IA)</th><td>${s.claude.configured ? `<span class="badge ok">configurado</span> modelo <span class="mono">${esc(s.claude.model)}</span>` : '<span class="badge bad">ANTHROPIC_API_KEY ausente</span>'}</td></tr>
       </table>
     </div>

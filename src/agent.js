@@ -33,50 +33,96 @@ async function calendarText(person) {
 }
 
 // ---------- envio para a pessoa ----------
-/** Manda uma mensagem do assistente para o WhatsApp da pessoa. */
+/**
+ * Manda uma mensagem da assistente para a pessoa.
+ *  - modo "assistant": sai do número da assistente daquela pessoa (instância própria).
+ *    Se esse número estiver desconectado ou o envio falhar, cai para a conversa "Você".
+ *  - modo "self": escreve na conversa "Você" do WhatsApp da própria pessoa, com o marcador 🤖.
+ */
 export async function notifyPerson(person, text, kind = 'chat') {
+  if (!person.phone) throw new Error('Número do WhatsApp da pessoa ainda não conhecido (conecte o WhatsApp dela primeiro)');
+  if (person.notify_mode === 'assistant' && person.assistant_instance_name) {
+    if (person.assistant_state === 'open') {
+      try {
+        const r = await evo.sendText(person.assistant_instance_name, person.phone, text);
+        await db.insertAlert(person.id, kind, text, r.id);
+        logger.info('Aviso enviado (número da assistente)', { person: person.name, kind, chars: text.length });
+        return r;
+      } catch (e) {
+        logger.error('Falha no número da assistente; usando a conversa "Você"', { person: person.name, err: String(e.message) });
+      }
+    } else {
+      logger.warn('Número da assistente desconectado; usando a conversa "Você"', { person: person.name, state: person.assistant_state });
+    }
+    text += '\n\n_(enviado pelo seu próprio número porque o número da assistente está desconectado)_';
+  }
+  if (!person.instance_name) throw new Error('Pessoa sem instância de WhatsApp');
   const body = `${MARK} ${text}`.trim();
-  let instance;
-  if (person.notify_mode === 'assistant' && config.evolution.assistantInstance) instance = config.evolution.assistantInstance;
-  else instance = person.instance_name;
-  if (!instance) throw new Error('Pessoa sem instância de WhatsApp');
-  if (!person.phone) throw new Error('Número do WhatsApp da pessoa ainda não conhecido (conecte o WhatsApp primeiro)');
-  const r = await evo.sendText(instance, person.phone, body);
+  const r = await evo.sendText(person.instance_name, person.phone, body);
   await db.insertAlert(person.id, kind, text, r.id);
-  logger.info('Aviso enviado', { person: person.name, kind, chars: body.length });
+  logger.info('Aviso enviado (conversa Você)', { person: person.name, kind, chars: body.length });
   return r;
 }
 
 // ---------- ingestão WhatsApp ----------
+// Cada pessoa tem duas instâncias: a dela (leitura) e a da assistente (conversa com ela).
+export const ROLES = {
+  person: { inst: 'instance_name', state: 'wa_state', qr: 'wa_qr', qrAt: 'wa_qr_at', phone: 'phone' },
+  assistant: { inst: 'assistant_instance_name', state: 'assistant_state', qr: 'assistant_qr', qrAt: 'assistant_qr_at', phone: 'assistant_phone' },
+};
+
 export async function handleEvolutionEvent(instance, body) {
   const person = await db.getPersonByInstance(instance);
   if (!person) { logger.warn('Webhook de instância desconhecida', { instance }); return; }
+  const role = person.assistant_instance_name === instance ? 'assistant' : 'person';
+  const cols = ROLES[role];
   const event = String(body.event || '').toLowerCase().replace(/_/g, '.');
   const data = body.data || {};
 
   if (event === 'qrcode.updated') {
     const qr = data.qrcode?.base64 || data.base64 || null;
-    if (qr) await db.setPersonFields(person.id, { wa_qr: qr, wa_qr_at: now(), wa_state: 'connecting' });
+    if (qr) await db.setPersonFields(person.id, { [cols.qr]: qr, [cols.qrAt]: now(), [cols.state]: 'connecting' });
     return;
   }
   if (event === 'connection.update') {
     const state = String(data.state || data.status || '').toLowerCase();
     if (state) {
-      const fields = { wa_state: state };
-      if (state === 'open') fields.wa_qr = null;
+      const fields = { [cols.state]: state };
+      if (state === 'open') fields[cols.qr] = null;
       await db.setPersonFields(person.id, fields);
-      // Descobre/atualiza o número da pessoa a partir da instância conectada
-      if (state === 'open' && (!person.phone || person.phone.length < 8)) {
+      // Descobre o número conectado nessa instância
+      if (state === 'open' && (!person[cols.phone] || person[cols.phone].length < 8)) {
         const num = await evo.fetchProfileNumber(instance);
-        if (num) await db.setPersonFields(person.id, { phone: num });
+        if (num) await db.setPersonFields(person.id, { [cols.phone]: num });
       }
     }
     return;
   }
   if (event === 'messages.upsert' || event === 'send.message') {
     const list = Array.isArray(data) ? data : [data];
-    for (const m of list) await ingestWhatsAppMessage(person, m);
+    for (const m of list) {
+      if (role === 'assistant') await ingestAssistantMessage(person, m);
+      else await ingestWhatsAppMessage(person, m);
+    }
   }
+}
+
+/** Mensagens que chegam no número da assistente: só a própria pessoa fala com ela. */
+async function ingestAssistantMessage(person, m) {
+  const key = m.key || {};
+  const jid = String(key.remoteJid || '');
+  if (!jid || evo.isGroupJid(jid) || jid.endsWith('@broadcast')) return;
+  if (key.fromMe) return; // o que a assistente enviou
+  if (!person.phone || evo.jidToNumber(jid) !== person.phone) {
+    logger.debug('Mensagem de terceiro no número da assistente ignorada', { person: person.name, from: evo.jidToNumber(jid) });
+    return;
+  }
+  const { text } = evo.extractText(m.message);
+  if (!text) return;
+  const externalId = key.id || `${jid}-${m.messageTimestamp || now()}`;
+  if (await db.alertExternalIdExists(person.id, externalId)) return;
+  await db.insertAlert(person.id, 'user', text, externalId);
+  handleUserCommand(person, text).catch((e) => logger.error('Erro no comando do usuário', { err: String(e.message) }));
 }
 
 async function ingestWhatsAppMessage(person, m) {
@@ -89,6 +135,8 @@ async function ingestWhatsAppMessage(person, m) {
   if (!text) return;
   const fromMe = Boolean(key.fromMe);
   const ownNumber = person.phone;
+  // Conversa entre a pessoa e o número da assistente: já é tratada pela instância da assistente
+  if (!group && person.assistant_phone && evo.jidToNumber(jid) === person.assistant_phone) return;
   const isSelfChat = !group && ownNumber && evo.jidToNumber(jid) === ownNumber;
   const ts = Number(m.messageTimestamp) || now();
   const externalId = key.id || `${jid}-${ts}`;
@@ -304,13 +352,17 @@ async function sendReplyToContact(person, item, text, { silent = false } = {}) {
 
 // ---------- ciclo de vida ----------
 async function refreshConnectionStates() {
+  if (!evo.configured()) return;
   for (const person of await db.listPeople()) {
-    if (!person.instance_name || !evo.configured()) continue;
-    try {
-      const state = await evo.connectionState(person.instance_name);
-      if (state && state !== person.wa_state) await db.setPersonFields(person.id, { wa_state: state });
-    } catch (e) {
-      if (e.status === 404) await db.setPersonFields(person.id, { wa_state: 'missing' });
+    for (const cols of Object.values(ROLES)) {
+      const inst = person[cols.inst];
+      if (!inst) continue;
+      try {
+        const state = await evo.connectionState(inst);
+        if (state && state !== person[cols.state]) await db.setPersonFields(person.id, { [cols.state]: state });
+      } catch (e) {
+        if (e.status === 404) await db.setPersonFields(person.id, { [cols.state]: 'missing' });
+      }
     }
   }
 }

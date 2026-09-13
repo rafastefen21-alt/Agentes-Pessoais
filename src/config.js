@@ -10,10 +10,15 @@ function bool(v, def = false) {
   return ['1', 'true', 'yes', 'on'].includes(String(v).toLowerCase());
 }
 
+function withScheme(url) {
+  if (!url) return '';
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+}
+
 export const config = {
   port: num(process.env.PORT, 3000),
-  // URL pública deste servidor (a Evolution precisa dela para chamar o webhook)
-  appUrl: (process.env.APP_URL || '').replace(/\/+$/, ''),
+  // URL pública deste servidor (a Evolution precisa dela para chamar o webhook). Aceita com ou sem "https://".
+  appUrl: withScheme((process.env.APP_URL || '').trim().replace(/\/+$/, '')),
   adminPassword: process.env.ADMIN_PASSWORD || '',
   appSecret: process.env.APP_SECRET || '',
   logLevel: process.env.LOG_LEVEL || 'info',
@@ -22,12 +27,11 @@ export const config = {
   databaseUrl: (process.env.DATABASE_URL || '').trim(),
 
   evolution: {
-    url: (process.env.EVOLUTION_URL || '').replace(/\/+$/, ''),
+    // Aceita a URL com ou sem "https://"
+    url: withScheme((process.env.EVOLUTION_URL || '').trim().replace(/\/+$/, '')),
     apikey: process.env.EVOLUTION_APIKEY || '',
     // Segredo que vai na URL do webhook para validar a origem
     webhookToken: process.env.EVOLUTION_WEBHOOK_TOKEN || process.env.APP_SECRET || '',
-    // Instância opcional de um número "assistente" dedicado (modo notify=assistant)
-    assistantInstance: process.env.ASSISTANT_INSTANCE || '',
     // Prefixo usado para nomear instâncias criadas pelo portal
     instancePrefix: process.env.INSTANCE_PREFIX || 'assist',
   },

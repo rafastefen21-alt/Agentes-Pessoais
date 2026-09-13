@@ -21,7 +21,12 @@ CREATE TABLE IF NOT EXISTS people (
   wa_state TEXT NOT NULL DEFAULT 'disconnected',
   wa_qr TEXT,
   wa_qr_at BIGINT,
-  notify_mode TEXT NOT NULL DEFAULT 'self',
+  assistant_instance_name TEXT UNIQUE,
+  assistant_state TEXT NOT NULL DEFAULT 'disconnected',
+  assistant_qr TEXT,
+  assistant_qr_at BIGINT,
+  assistant_phone TEXT DEFAULT '',
+  notify_mode TEXT NOT NULL DEFAULT 'assistant',
   ignore_groups INTEGER NOT NULL DEFAULT 1,
   email_enabled INTEGER NOT NULL DEFAULT 0,
   imap_host TEXT, imap_port INTEGER DEFAULT 993, imap_user TEXT, imap_pass TEXT,
@@ -118,6 +123,16 @@ CREATE TABLE IF NOT EXISTS kv (
 const PG_SECURITY = ['people', 'messages', 'items', 'alerts', 'calendar_events', 'api_usage', 'kv']
   .map((t) => `ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;`).join('\n');
 
+// Colunas adicionadas depois da primeira versão (bancos já criados recebem via ALTER TABLE)
+const MIGRATIONS = [
+  'ALTER TABLE people ADD COLUMN assistant_instance_name TEXT',
+  "ALTER TABLE people ADD COLUMN assistant_state TEXT NOT NULL DEFAULT 'disconnected'",
+  'ALTER TABLE people ADD COLUMN assistant_qr TEXT',
+  'ALTER TABLE people ADD COLUMN assistant_qr_at BIGINT',
+  "ALTER TABLE people ADD COLUMN assistant_phone TEXT DEFAULT ''",
+];
+const isDuplicateColumn = (e) => /duplicate column|already exists/i.test(String(e.message));
+
 export function schemaSql(dialect = 'postgres') {
   const isPg = dialect === 'postgres';
   const sql = SCHEMA
@@ -164,6 +179,9 @@ async function initPostgres() {
         if (!/row level security|permission denied/i.test(e.message)) throw e;
       }
     }
+    for (const stmt of MIGRATIONS) {
+      try { await client.query(stmt); } catch (e) { if (!isDuplicateColumn(e)) throw e; }
+    }
   } finally { client.release(); }
   return {
     all: async (sql, params = []) => (await pool.query(sql, params)).rows,
@@ -180,6 +198,9 @@ async function initSqlite() {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(schemaSql('sqlite'));
+  for (const stmt of MIGRATIONS) {
+    try { db.exec(stmt); } catch (e) { if (!isDuplicateColumn(e)) throw e; }
+  }
   const tr = (sql) => sql.replace(/\$\d+/g, '?');
   return {
     all: async (sql, params = []) => db.prepare(tr(sql)).all(...params),
@@ -235,8 +256,9 @@ export function listPeople() {
 export function getPerson(id) {
   return get('SELECT * FROM people WHERE id = $1', [id]);
 }
+/** Acha a pessoa por qualquer uma das duas instâncias (a dela ou a da assistente). */
 export function getPersonByInstance(instance) {
-  return get('SELECT * FROM people WHERE instance_name = $1', [instance]);
+  return get('SELECT * FROM people WHERE instance_name = $1 OR assistant_instance_name = $2', [instance, instance]);
 }
 export async function insertPerson(data) {
   const cols = PERSON_COLS.filter((c) => data[c] !== undefined);

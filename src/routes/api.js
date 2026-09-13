@@ -8,7 +8,7 @@ import * as email from '../email.js';
 import { encrypt } from '../crypto.js';
 import { syncCalendar, upcomingEvents } from '../calendar.js';
 import { claudeConfigured } from '../ai/claude.js';
-import { notifyPerson, sendDigest, pollEmail } from '../agent.js';
+import { notifyPerson, sendDigest, pollEmail, ROLES } from '../agent.js';
 import { lastEvents } from './webhooks.js';
 
 export const api = Router();
@@ -23,8 +23,12 @@ function slug(s) {
 }
 function publicPerson(p) {
   if (!p) return p;
-  const { imap_pass, wa_qr, ...rest } = p;
-  return { ...rest, has_imap_pass: Boolean(imap_pass), has_qr: Boolean(wa_qr) };
+  const { imap_pass, wa_qr, assistant_qr, ...rest } = p;
+  return { ...rest, has_imap_pass: Boolean(imap_pass), has_qr: Boolean(wa_qr), has_assistant_qr: Boolean(assistant_qr) };
+}
+/** ?role=person (WhatsApp da pessoa) ou ?role=assistant (número da assistente). */
+function roleOf(req) {
+  return req.query.role === 'assistant' ? ROLES.assistant : ROLES.person;
 }
 async function loadPerson(req, res) {
   const p = await db.getPerson(Number(req.params.id));
@@ -78,7 +82,7 @@ api.get('/status', wrap(async (req, res) => {
     ok: true,
     appUrl: config.appUrl,
     database: db.dialect,
-    evolution: { configured: evo.configured(), url: config.evolution.url, ...evolution, assistantInstance: config.evolution.assistantInstance },
+    evolution: { configured: evo.configured(), url: config.evolution.url, ...evolution },
     claude: { configured: claudeConfigured(), model: config.claude.model },
     problems: validateConfig(),
     lastEvents: lastEvents.slice(0, 20),
@@ -102,10 +106,10 @@ api.post('/people', wrap(async (req, res) => {
   const person = await db.insertPerson({
     name: String(b.name).trim(), phone, timezone: b.timezone || 'America/Sao_Paulo',
     context_notes: b.context_notes || '', ignore_groups: b.ignore_groups === false ? 0 : 1,
-    notify_mode: b.notify_mode === 'assistant' ? 'assistant' : 'self',
+    notify_mode: b.notify_mode === 'self' ? 'self' : 'assistant',
   });
-  const instance = `${config.evolution.instancePrefix}-${slug(person.name)}-${person.id}`;
-  await db.setPersonFields(person.id, { instance_name: instance });
+  const base = `${config.evolution.instancePrefix}-${slug(person.name)}-${person.id}`;
+  await db.setPersonFields(person.id, { instance_name: base, assistant_instance_name: `${base}-bot` });
   res.json({ ok: true, person: publicPerson(await db.getPerson(person.id)) });
 }));
 
@@ -143,8 +147,10 @@ api.put('/people/:id', wrap(async (req, res) => {
 
 api.delete('/people/:id', wrap(async (req, res) => {
   const p = await loadPerson(req, res); if (!p) return;
-  if (p.instance_name && evo.configured()) {
-    try { await evo.deleteInstance(p.instance_name); } catch (e) { logger.warn('Não foi possível apagar instância', { err: String(e.message) }); }
+  if (evo.configured()) {
+    for (const inst of [p.instance_name, p.assistant_instance_name].filter(Boolean)) {
+      try { await evo.deleteInstance(inst); } catch (e) { logger.warn('Não foi possível apagar instância', { inst, err: String(e.message) }); }
+    }
   }
   await db.deletePerson(p.id);
   res.json({ ok: true });
@@ -154,7 +160,9 @@ api.delete('/people/:id', wrap(async (req, res) => {
 api.post('/people/:id/whatsapp/connect', wrap(async (req, res) => {
   const p = await loadPerson(req, res); if (!p) return;
   if (!config.appUrl) return res.status(400).json({ ok: false, error: 'Defina APP_URL no .env (URL pública deste servidor) antes de conectar.' });
-  const instance = p.instance_name;
+  const cols = roleOf(req);
+  const instance = p[cols.inst];
+  if (!instance) return res.status(400).json({ ok: false, error: 'Pessoa sem nome de instância' });
   let state = null;
   try { state = await evo.connectionState(instance); } catch (e) { if (e.status !== 404) throw e; }
   let qr = null;
@@ -163,7 +171,7 @@ api.post('/people/:id/whatsapp/connect', wrap(async (req, res) => {
     qr = created?.qrcode?.base64 || created?.base64 || null;
     state = 'connecting';
   } else if (state === 'open') {
-    await db.setPersonFields(p.id, { wa_state: 'open', wa_qr: null });
+    await db.setPersonFields(p.id, { [cols.state]: 'open', [cols.qr]: null });
     return res.json({ ok: true, state: 'open' });
   } else {
     // garante que o webhook aponta para cá (caso APP_URL tenha mudado)
@@ -172,56 +180,61 @@ api.post('/people/:id/whatsapp/connect', wrap(async (req, res) => {
   if (!qr) {
     try { const c = await evo.connect(instance); qr = c.base64; } catch (e) { logger.warn('connect falhou', { err: String(e.message) }); }
   }
-  await db.setPersonFields(p.id, { wa_state: state, ...(qr ? { wa_qr: qr, wa_qr_at: Math.floor(Date.now() / 1000) } : {}) });
-  res.json({ ok: true, state, qr: qr || (await db.getPerson(p.id)).wa_qr });
+  await db.setPersonFields(p.id, { [cols.state]: state, ...(qr ? { [cols.qr]: qr, [cols.qrAt]: Math.floor(Date.now() / 1000) } : {}) });
+  res.json({ ok: true, state, qr: qr || (await db.getPerson(p.id))[cols.qr] });
 }));
 
 api.get('/people/:id/whatsapp/status', wrap(async (req, res) => {
   const p = await loadPerson(req, res); if (!p) return;
-  let state = p.wa_state;
-  if (evo.configured() && p.instance_name) {
-    try { state = await evo.connectionState(p.instance_name); } catch (e) { state = e.status === 404 ? 'missing' : state; }
+  const cols = roleOf(req);
+  const instance = p[cols.inst];
+  let state = p[cols.state];
+  if (evo.configured() && instance) {
+    try { state = await evo.connectionState(instance); } catch (e) { state = e.status === 404 ? 'missing' : state; }
   }
-  let qr = p.wa_qr;
+  let qr = p[cols.qr];
   if (state === 'open') qr = null;
-  else if (evo.configured() && (!qr || (p.wa_qr_at && Date.now() / 1000 - p.wa_qr_at > 40))) {
+  else if (evo.configured() && instance && (!qr || (p[cols.qrAt] && Date.now() / 1000 - p[cols.qrAt] > 40))) {
     // QR expira em ~40s: pede um novo
     try {
-      const c = await evo.connect(p.instance_name);
-      if (c.base64) { qr = c.base64; await db.setPersonFields(p.id, { wa_qr: qr, wa_qr_at: Math.floor(Date.now() / 1000) }); }
+      const c = await evo.connect(instance);
+      if (c.base64) { qr = c.base64; await db.setPersonFields(p.id, { [cols.qr]: qr, [cols.qrAt]: Math.floor(Date.now() / 1000) }); }
     } catch { /* ignora */ }
   }
-  if (state !== p.wa_state) await db.setPersonFields(p.id, { wa_state: state });
-  if (state === 'open' && (!p.phone || p.phone.length < 8)) {
-    const num = await evo.fetchProfileNumber(p.instance_name);
-    if (num) await db.setPersonFields(p.id, { phone: num });
+  if (state !== p[cols.state]) await db.setPersonFields(p.id, { [cols.state]: state });
+  if (state === 'open' && (!p[cols.phone] || p[cols.phone].length < 8)) {
+    const num = await evo.fetchProfileNumber(instance);
+    if (num) await db.setPersonFields(p.id, { [cols.phone]: num });
   }
-  res.json({ ok: true, state, qr, phone: (await db.getPerson(p.id)).phone });
+  res.json({ ok: true, state, qr, phone: (await db.getPerson(p.id))[cols.phone] });
 }));
 
 api.post('/people/:id/whatsapp/logout', wrap(async (req, res) => {
   const p = await loadPerson(req, res); if (!p) return;
-  try { await evo.logout(p.instance_name); } catch (e) { if (e.status !== 404) throw e; }
-  await db.setPersonFields(p.id, { wa_state: 'close', wa_qr: null });
+  const cols = roleOf(req);
+  try { await evo.logout(p[cols.inst]); } catch (e) { if (e.status !== 404) throw e; }
+  await db.setPersonFields(p.id, { [cols.state]: 'close', [cols.qr]: null });
   res.json({ ok: true });
 }));
 
 api.post('/people/:id/whatsapp/reset', wrap(async (req, res) => {
   // Apaga a instância na Evolution e recria na próxima conexão
   const p = await loadPerson(req, res); if (!p) return;
-  try { await evo.deleteInstance(p.instance_name); } catch (e) { if (e.status !== 404) throw e; }
-  await db.setPersonFields(p.id, { wa_state: 'disconnected', wa_qr: null });
+  const cols = roleOf(req);
+  try { await evo.deleteInstance(p[cols.inst]); } catch (e) { if (e.status !== 404) throw e; }
+  await db.setPersonFields(p.id, { [cols.state]: 'disconnected', [cols.qr]: null });
   res.json({ ok: true });
 }));
 
 api.get('/people/:id/whatsapp/webhook', wrap(async (req, res) => {
   const p = await loadPerson(req, res); if (!p) return;
-  const info = await evo.findWebhook(p.instance_name);
-  res.json({ ok: true, expected: evo.webhookUrl(p.instance_name), info });
+  const inst = p[roleOf(req).inst];
+  const info = await evo.findWebhook(inst);
+  res.json({ ok: true, expected: evo.webhookUrl(inst), info });
 }));
 api.post('/people/:id/whatsapp/webhook', wrap(async (req, res) => {
   const p = await loadPerson(req, res); if (!p) return;
-  const r = await evo.setWebhook(p.instance_name);
+  const r = await evo.setWebhook(p[roleOf(req).inst]);
   res.json({ ok: true, result: r });
 }));
 

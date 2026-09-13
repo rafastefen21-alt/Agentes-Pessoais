@@ -7,10 +7,10 @@ Uma assistente que lê o WhatsApp e os e-mails de uma pessoa, avisa no próprio 
 | Situação | O que acontece |
 |---|---|
 | Chega mensagem no WhatsApp ou e-mail | Espera ~1 min para juntar mensagens picadas, lê o histórico da conversa e a agenda, e classifica com IA: urgência (baixa/média/alta/crítica), categoria, resumo, se precisa de resposta, sugestão de resposta e prazo. |
-| É urgente | Manda um aviso na conversa **"Você"** do WhatsApp da pessoa: resumo + sugestão de resposta + `enviar #12` para mandar. |
+| É urgente | Manda um aviso pelo **número da assistente** da pessoa (um chip exclusivo dela): resumo + sugestão de resposta + `enviar #12` para mandar. |
 | Não é urgente | Fica na lista de pendências e entra no próximo resumo. |
 | Horários configurados (ex.: 08:00, 13:00, 18:00) | Manda o resumo: o que precisa de resposta, agenda de hoje/amanhã, conflitos e o resto em uma linha. |
-| A pessoa responde na conversa "Você" | `enviar #12`, `resumo`, `agenda`, `feito #12`, `ajuda`, ou texto livre ("responde pro João que amanhã às 10h fica bom", "o que a Maria queria?"). A assistente só envia mensagem a terceiros quando a pessoa pede explicitamente. |
+| A pessoa responde para a assistente | `enviar #12`, `resumo`, `agenda`, `feito #12`, `ajuda`, ou texto livre ("responde pro João que amanhã às 10h fica bom", "o que a Maria queria?"). A assistente só envia mensagem a terceiros quando a pessoa pede explicitamente. |
 | A pessoa responde o contato por conta própria | A pendência daquela conversa é fechada automaticamente. |
 
 ## Arquitetura
@@ -24,7 +24,7 @@ Calendário ICS (agenda)   ──polling──▶  src/calendar.js ────�
                                                                 │
                                                     src/ai/claude.js (Claude Opus 5, saída estruturada)
                                                                 │
-                                          Evolution sendText ◀──┘  → WhatsApp da pessoa (conversa "Você")
+                                          Evolution sendText ◀──┘  → número da assistente → WhatsApp da pessoa
 
 Portal (public/ + src/routes/api.js): cadastra pessoas, conecta WhatsApp (QR), e-mail, agenda, preferências,
                                       vê pendências, mensagens lidas e a conversa com a assistente.
@@ -84,15 +84,19 @@ cloudflared tunnel --url http://localhost:3000
 ## Configurando uma pessoa
 
 1. **Pessoas → Nova pessoa**: nome, contexto (quem é, prioridades, clientes VIP, tom) e se lê grupos.
-2. **WhatsApp → Conectar / gerar QR**: escaneia no celular da pessoa (Aparelhos conectados). O número é detectado sozinho.
+2. **WhatsApp**: duas conexões, cada uma com seu QR:
+   - **WhatsApp da pessoa (leitura)**: escaneia no celular da própria pessoa (Aparelhos conectados). O número é detectado sozinho.
+   - **Número da assistente**: um chip exclusivo dessa pessoa, de onde a assistente escreve e recebe os comandos. Escaneia no aparelho que tem esse chip. Peça para a pessoa salvar o contato.
 3. **E-mail**: servidor IMAP (há presets: Gmail, Outlook, iCloud…), usuário e senha de app. "Testar conexão" e salvar. Só e-mails novos a partir daí são lidos.
 4. **Agenda**: link ICS secreto do Google Agenda ou Outlook.
 5. **Preferências**: horários dos resumos, período de silêncio, a partir de qual urgência avisar na hora.
 6. Clique em **Mensagem de teste**: a pessoa recebe um "oi" da assistente na conversa "Você".
 
-### Número dedicado da assistente (opcional)
+### Por que um número de assistente por pessoa
 
-Por padrão a assistente escreve na conversa "Você" (mensagem para o próprio número), então não precisa de nenhum número extra. Se preferir que os avisos venham de um número separado, conecte esse número numa instância da Evolution, informe o nome em `ASSISTANT_INSTANCE` e, na pessoa, escolha "Avisar por: número dedicado".
+Cada pessoa tem **duas instâncias** na Evolution: o WhatsApp dela (só leitura, e de onde saem as respostas aos contatos) e o número da assistente (por onde ela conversa com a pessoa). Não existe um número central: se o número da assistente de alguém cair, só aquela pessoa é afetada, e mesmo assim os avisos continuam chegando pela conversa "Você" do próprio WhatsApp dela até reconectar.
+
+Se preferir não usar um chip extra para alguma pessoa, em Preferências escolha "Avisar por: conversa Você" — a assistente passa a escrever na conversa da pessoa com ela mesma, marcando as mensagens com 🤖.
 
 ## Custos e privacidade
 
