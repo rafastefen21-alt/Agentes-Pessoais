@@ -18,8 +18,20 @@ export async function connectInstance(person, cols) {
   try { state = await evo.connectionState(instance); } catch (e) { if (e.status !== 404) throw e; }
   let qr = null;
   if (!state || state === 'unknown') {
-    const created = await evo.createInstance(instance);
-    qr = created?.qrcode?.base64 || created?.base64 || null;
+    try {
+      const created = await evo.createInstance(instance);
+      qr = created?.qrcode?.base64 || created?.base64 || null;
+    } catch (e) {
+      // A Evolution às vezes demora e o Railway responde 502/503/504 mesmo tendo criado a instância.
+      if (![502, 503, 504].includes(e.status)) throw e;
+      logger.warn('Evolution não respondeu à criação; verificando se a instância existe', { instance, status: e.status });
+      let exists = false;
+      for (let i = 0; i < 4 && !exists; i++) {
+        await new Promise((r) => setTimeout(r, 4000));
+        try { await evo.connectionState(instance); exists = true; } catch (e2) { if (e2.status !== 404) exists = false; }
+      }
+      if (!exists) throw fail('A Evolution não respondeu à criação da instância (502). Aguarde 30 s e clique em Conectar de novo.', 502);
+    }
     state = 'connecting';
   } else if (state === 'open') {
     await db.setPersonFields(person.id, { [cols.state]: 'open', [cols.qr]: null });
