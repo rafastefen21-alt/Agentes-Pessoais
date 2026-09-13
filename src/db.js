@@ -82,7 +82,10 @@ CREATE TABLE IF NOT EXISTS items (
   status TEXT NOT NULL DEFAULT 'open',
   notified_at BIGINT,
   created_at BIGINT NOT NULL DEFAULT {{NOW}},
-  last_message_ts BIGINT
+  last_message_ts BIGINT,
+  owner TEXT NOT NULL DEFAULT 'contact',
+  due_ts BIGINT,
+  reminded_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_items_person_status ON items(person_id, status);
 
@@ -140,6 +143,9 @@ const MIGRATIONS = [
   'ALTER TABLE people ADD COLUMN style_profile TEXT',
   'ALTER TABLE people ADD COLUMN profile_updated_at BIGINT',
   "ALTER TABLE people ADD COLUMN profile_status TEXT DEFAULT ''",
+  "ALTER TABLE items ADD COLUMN owner TEXT NOT NULL DEFAULT 'contact'",
+  'ALTER TABLE items ADD COLUMN due_ts BIGINT',
+  'ALTER TABLE items ADD COLUMN reminded_at BIGINT',
 ];
 const isDuplicateColumn = (e) => /duplicate column|already exists/i.test(String(e.message));
 
@@ -355,6 +361,35 @@ export async function upsertItem(it) {
     it.person_id, it.channel, it.chat_id, it.contact_name, it.urgency, it.category, it.summary,
     it.needs_reply ? 1 : 0, it.suggested_reply || null, it.deadline || null, it.last_message_ts]);
   return r.row.id;
+}
+/** Compromisso assumido pela própria pessoa (owner = 'me'). Evita duplicar a mesma descrição na mesma conversa. */
+export async function insertCommitment(c) {
+  const dup = await get(`SELECT id FROM items WHERE person_id = $1 AND chat_id = $2 AND owner = 'me' AND status IN ('open','notified') AND LOWER(summary) = LOWER($3)`,
+    [c.person_id, c.chat_id, c.summary]);
+  if (dup) { await run('UPDATE items SET due_ts = COALESCE($1, due_ts), deadline = COALESCE($2, deadline), last_message_ts = $3 WHERE id = $4', [c.due_ts || null, c.deadline || null, c.last_message_ts, dup.id]); return dup.id; }
+  const r = await run(`INSERT INTO items (person_id, channel, chat_id, contact_name, urgency, category, summary, needs_reply, suggested_reply, deadline, last_message_ts, owner, due_ts)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,0,NULL,$8,$9,'me',$10) RETURNING id`,
+    [c.person_id, c.channel, c.chat_id, c.contact_name, c.urgency || 2, 'compromisso', c.summary, c.deadline || null, c.last_message_ts, c.due_ts || null]);
+  return r.row.id;
+}
+/** Compromissos da pessoa com vencimento até `untilTs` que ainda não foram lembrados. */
+export function dueCommitments(personId, untilTs) {
+  return all(`SELECT * FROM items WHERE person_id = $1 AND owner = 'me' AND status IN ('open','notified') AND due_ts IS NOT NULL
+    AND due_ts <= $2 AND reminded_at IS NULL ORDER BY due_ts`, [personId, untilTs]);
+}
+export async function markReminded(id) {
+  await run('UPDATE items SET reminded_at = $1, status = $2 WHERE id = $3', [Math.floor(Date.now() / 1000), 'notified', id]);
+}
+/** Conversas recentes com nome e última mensagem (para a pessoa pedir "resume a conversa com X"). */
+export async function recentChats(personId, limit = 40) {
+  const rows = await all(`SELECT chat_id, MAX(CASE WHEN direction = 'in' THEN sender_name END) AS name, MAX(ts) AS last_ts, COUNT(*) AS n
+    FROM messages WHERE person_id = $1 AND channel = 'whatsapp' GROUP BY chat_id ORDER BY last_ts DESC LIMIT $2`, [personId, limit]);
+  const out = [];
+  for (const r of rows) {
+    const last = await get('SELECT text, direction FROM messages WHERE person_id = $1 AND chat_id = $2 ORDER BY ts DESC LIMIT 1', [personId, r.chat_id]);
+    out.push({ ...r, n: Number(r.n), last_text: last ? last.text.slice(0, 80) : '' });
+  }
+  return out;
 }
 export function getItem(id) {
   return get('SELECT * FROM items WHERE id = $1', [id]);

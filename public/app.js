@@ -371,7 +371,7 @@ function tabItems(body, { person: p, items }) {
   const closed = items.filter((i) => !['open', 'notified'].includes(i.status));
   const card = (it) => `
     <div class="item u${it.urgency}">
-      <div class="top"><span class="who">#${it.id} ${esc(it.contact_name)} <span class="badge">${it.channel === 'email' ? 'e-mail' : 'WhatsApp'}</span> <span class="badge ${it.urgency >= 3 ? 'warn' : ''}">${URG[it.urgency]}</span> ${it.category ? `<span class="badge">${esc(it.category)}</span>` : ''}</span><span class="small muted">${fmtTs(it.last_message_ts)} · ${esc(it.status)}</span></div>
+      <div class="top"><span class="who">#${it.id} ${it.owner === 'me' ? `<span class="badge info">${icon('clock')} ficou de fazer</span>` : ''} ${esc(it.contact_name)} <span class="badge">${it.channel === 'email' ? 'e-mail' : 'WhatsApp'}</span> <span class="badge ${it.urgency >= 3 ? 'warn' : ''}">${URG[it.urgency]}</span> ${it.category ? `<span class="badge">${esc(it.category)}</span>` : ''}</span><span class="small muted">${it.due_ts ? `vence ${fmtTs(it.due_ts)} · ` : ''}${fmtTs(it.last_message_ts)} · ${esc(it.status)}</span></div>
       <div class="sum">${esc(it.summary)}${it.deadline ? ` <b>· prazo: ${esc(it.deadline)}</b>` : ''}</div>
       ${it.suggested_reply ? `<div class="sug">Sugestão: ${esc(it.suggested_reply)}</div>` : ''}
       ${['open', 'notified'].includes(it.status) ? `<div class="actions">

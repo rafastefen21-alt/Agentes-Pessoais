@@ -46,11 +46,13 @@ export const URGENCY_LABEL = { 1: 'baixa', 2: 'média', 3: 'alta', 4: 'crítica'
 const ChatSchema = z.object({
   reply: z.string().describe('Mensagem para enviar no WhatsApp da pessoa (formato WhatsApp).'),
   actions: z.array(z.object({
-    type: z.enum(['send_reply', 'propose_reply', 'mark_done', 'send_digest', 'none']).describe(
+    type: z.enum(['send_reply', 'propose_reply', 'mark_done', 'send_digest', 'summarize_chat', 'none']).describe(
       'send_reply: a pessoa pediu EXPLICITAMENTE para enviar agora ("manda", "envia", "pode mandar", "responde pra ele que..."). ' +
       'propose_reply: você redigiu um rascunho e quer confirmação antes de enviar. ' +
-      'mark_done: a pessoa disse que já resolveu/ignorar o item. send_digest: a pessoa pediu o resumo geral.'),
+      'mark_done: a pessoa disse que já resolveu/ignorar o item. send_digest: a pessoa pediu o resumo geral. ' +
+      'summarize_chat: a pessoa pediu para resumir/relembrar a conversa com um contato (use chat_id da lista de conversas; o resumo será gerado e enviado em seguida, então na reply diga apenas que vai buscar).'),
     item_id: z.number().nullable().describe('ID do item (da lista de pendências) a que a ação se refere. null se não se aplica.'),
+    chat_id: z.string().nullable().describe('Para summarize_chat: o chat_id exato da lista de conversas. null se não se aplica ou se ficou ambíguo (nesse caso pergunte na reply qual contato).'),
     text: z.string().nullable().describe('Texto da resposta a enviar ao contato (para send_reply / propose_reply).'),
   })),
 });
@@ -229,14 +231,17 @@ export async function triage(p) {
 
 // ---------- resumo periódico ----------
 export async function digest({ person, items, calendar, stats, sinceLabel }) {
-  const list = items.length
-    ? items.map((it) => `- #${it.id} [${URGENCY_LABEL[it.urgency]}] (${it.channel}) ${it.contact_name}: ${it.summary}${it.needs_reply ? ' — aguarda resposta' : ''}${it.deadline ? ` — prazo: ${it.deadline}` : ''}${it.suggested_reply ? `\n    sugestão: "${it.suggested_reply}"` : ''}`).join('\n')
-    : '(nenhuma pendência)';
+  const mine = items.filter((it) => it.owner === 'me');
+  const theirs = items.filter((it) => it.owner !== 'me');
+  const fmtItem = (it) => `- #${it.id} [${URGENCY_LABEL[it.urgency]}] (${it.channel}) ${it.contact_name}: ${it.summary}${it.needs_reply ? ' — aguarda resposta' : ''}${it.deadline ? ` — prazo: ${it.deadline}` : ''}${it.suggested_reply ? `\n    sugestão: "${it.suggested_reply}"` : ''}`;
+  const list = theirs.length ? theirs.map(fmtItem).join('\n') : '(nenhuma pendência)';
+  const promises = mine.length ? mine.map(fmtItem).join('\n') : '(nenhum compromisso registrado)';
   const user = [
     personBlock(person, { calendar }),
     `\n## Volume ${sinceLabel}: WhatsApp ${stats.last24h?.whatsapp || 0} mensagens, e-mail ${stats.last24h?.email || 0}`,
-    `\n## Pendências abertas (já triadas)\n${list}`,
-    `\nEscreva o RESUMO para enviar no WhatsApp de ${person.name.split(' ')[0]}. Estrutura: (1) o que é urgente/precisa de resposta, com a sugestão de resposta quando houver, citando o número do item como "#id" para ela poder responder "enviar #id"; (2) agenda de hoje e amanhã e conflitos; (3) o resto em uma linha cada, se houver. Máximo ~1500 caracteres. Se não houver nada relevante, diga isso em uma frase simpática e curta.`,
+    `\n## Pendências abertas (o que os outros esperam dela)\n${list}`,
+    `\n## Compromissos que ELA assumiu nas conversas (o que ela ficou de fazer)\n${promises}`,
+    `\nEscreva o RESUMO para enviar no WhatsApp de ${person.name.split(' ')[0]}. Estrutura: (1) o que ela ficou de fazer e está vencendo (hoje/amanhã), com "#id"; (2) o que é urgente/precisa de resposta, com a sugestão de resposta quando houver, citando "#id" para ela responder "enviar #id"; (3) agenda de hoje e amanhã e conflitos; (4) o resto em uma linha cada, se houver. Máximo ~1500 caracteres. Se não houver nada relevante, diga isso em uma frase simpática e curta.`,
   ].join('\n');
   const { text } = await callClaude({
     system: SYSTEM_BASE + '\n\nSua tarefa agora é escrever o resumo periódico (texto puro para WhatsApp, sem JSON).',
@@ -244,6 +249,60 @@ export async function digest({ person, items, calendar, stats, sinceLabel }) {
     effort: config.claude.digestEffort,
     maxTokens: 3000,
     meta: { personId: person.id, kind: 'resumo' },
+  });
+  return text;
+}
+
+// ---------- compromissos assumidos pela pessoa ----------
+const CommitSchema = z.object({
+  compromissos: z.array(z.object({
+    descricao: z.string().describe('O que a pessoa ficou de fazer, curto e concreto (ex.: "enviar o relatório de manutenção do elevador 2").'),
+    para_quem: z.string().describe('Nome do contato/empresa a quem prometeu.'),
+    quando_texto: z.string().nullable().describe('Quando, como foi dito (ex.: "amanhã cedo", "até sexta", "semana que vem"). null se não há prazo.'),
+    due_at: z.string().nullable().describe('Data/hora limite em ISO 8601 com fuso (ex.: 2026-09-15T09:00:00-03:00), inferida a partir de "agora" e do texto. "amanhã" sem hora = 09:00; "até sexta" = sexta 18:00; "semana que vem" = segunda 09:00. null se não dá para inferir.'),
+    ja_cumprido: z.boolean().describe('true se, pela própria conversa, a pessoa já fez o que prometeu.'),
+  })),
+});
+/** Lê mensagens ESCRITAS pela pessoa numa conversa e extrai o que ela ficou de fazer. */
+export async function extractCommitments({ person, contactLabel, history, fresh }) {
+  const fmtTs = (ts) => new Intl.DateTimeFormat('pt-BR', { timeZone: person.timezone, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(ts * 1000));
+  const line = (m) => `[${fmtTs(m.ts)}] ${m.direction === 'out' ? person.name + ' (ela)' : (m.sender_name || 'contato')}: ${m.text}`;
+  const freshIds = new Set(fresh.map((m) => m.id));
+  const user = [
+    personBlock(person),
+    `\n## Conversa com: ${contactLabel}`,
+    `\n## Histórico recente\n${history.filter((m) => !freshIds.has(m.id)).map(line).join('\n') || '(vazio)'}`,
+    `\n## Mensagens NOVAS escritas pela pessoa\n${fresh.map(line).join('\n')}`,
+    `\nListe apenas compromissos REAIS que a pessoa assumiu nessas mensagens novas (promessas de enviar, ligar, ir, pagar, resolver, agendar). Nada de intenções vagas. Se não houver, devolva lista vazia.`,
+  ].join('\n');
+  const { text } = await callClaude({
+    system: SYSTEM_BASE + '\n\nSua tarefa agora é extrair COMPROMISSOS que a própria pessoa assumiu e devolver um JSON.',
+    messages: [{ role: 'user', content: user }],
+    format: zodOutputFormat(CommitSchema),
+    effort: config.claude.triageEffort,
+    maxTokens: 1500,
+    meta: { personId: person.id, kind: 'compromissos' },
+  });
+  return parseJson(text, CommitSchema).compromissos;
+}
+
+/** Resumo de uma conversa específica, a pedido da pessoa ("resume a última conversa com X"). */
+export async function summarizeConversation({ person, contactLabel, messages, request }) {
+  const fmtTs = (ts) => new Intl.DateTimeFormat('pt-BR', { timeZone: person.timezone, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(ts * 1000));
+  const lines = messages.map((m) => `[${fmtTs(m.ts)}] ${m.direction === 'out' ? person.name.split(' ')[0] : (m.sender_name || 'contato')}: ${m.text}`).join('\n');
+  const user = [
+    personBlock(person),
+    `\n## Conversa com: ${contactLabel}`,
+    `\n## Mensagens (mais antigas primeiro)\n${lines}`,
+    `\n## O que a pessoa pediu\n${request}`,
+    `\nEscreva o resumo para o WhatsApp dela: (1) assunto e situação atual em 2-3 frases; (2) o que ficou combinado, com quem faz o quê e quando; (3) o que ainda está em aberto ou esperando alguém; (4) datas e valores citados. Use *negrito* nos pontos-chave e listas com "-". Máximo ~1200 caracteres. Se a conversa for antiga, diga a data da última mensagem.`,
+  ].join('\n');
+  const { text } = await callClaude({
+    system: SYSTEM_BASE + '\n\nSua tarefa agora é RESUMIR uma conversa específica (texto puro para WhatsApp, sem JSON).',
+    messages: [{ role: 'user', content: user }],
+    effort: config.claude.triageEffort,
+    maxTokens: 2000,
+    meta: { personId: person.id, kind: 'resumo_conversa' },
   });
   return text;
 }
@@ -281,7 +340,10 @@ export async function monthlyReport({ person, monthLabel, stats, items, events, 
 }
 
 // ---------- conversa com o assistente ----------
-export async function chat({ person, history, items, calendar, userMessage }) {
+export async function chat({ person, history, items, calendar, userMessage, chats = [] }) {
+  const chatList = chats.length
+    ? chats.map((c) => `- chat_id ${c.chat_id} | ${c.name || '(sem nome)'} | última: ${new Date(c.last_ts * 1000).toLocaleDateString('pt-BR')} | "${c.last_text}"`).join('\n')
+    : '(nenhuma conversa registrada ainda)';
   const list = items.length
     ? items.map((it) => `- item_id ${it.id} [${URGENCY_LABEL[it.urgency]}] (${it.channel}, chat ${it.chat_id}) ${it.contact_name}: ${it.summary}${it.needs_reply ? ' — aguarda resposta' : ''}${it.suggested_reply ? `\n    sugestão atual: "${it.suggested_reply}"` : ''}`).join('\n')
     : '(nenhuma pendência aberta)';
@@ -289,7 +351,8 @@ export async function chat({ person, history, items, calendar, userMessage }) {
 Regras de ação:
 - Só use "send_reply" quando ela pediu explicitamente para enviar agora. Se ela pediu para "preparar", "escrever", "sugerir" ou se houver dúvida, use "propose_reply" e peça confirmação na reply (ela responde "enviar").
 - Toda ação de envio precisa de item_id válido da lista de pendências e do texto completo.
-- Se ela mencionar algo que não está nas pendências nem no histórico, diga que não tem essa informação.`;
+- Se ela pedir para resumir/relembrar a conversa com alguém ("resume a última conversa com o síndico do prédio X", "o que combinei com o fornecedor Y?"), escolha o chat_id certo na lista de conversas (pelo nome, pelo número ou pela última mensagem, ajudado pelo perfil de contatos) e use "summarize_chat". Se houver mais de um candidato, pergunte qual em vez de chutar.
+- Se ela mencionar algo que não está nas pendências, nas conversas nem no histórico, diga que não tem essa informação.`;
   const messages = [];
   for (const h of history) {
     messages.push({ role: h.kind === 'user' ? 'user' : 'assistant', content: h.text });
@@ -302,7 +365,7 @@ Regras de ação:
     else normalized.push({ ...m });
   }
   while (normalized.length && normalized[0].role !== 'user') normalized.shift();
-  const context = `${personBlock(person, { calendar })}\n\n## Pendências abertas\n${list}\n\n## Mensagem da pessoa agora\n${userMessage}`;
+  const context = `${personBlock(person, { calendar })}\n\n## Pendências abertas\n${list}\n\n## Conversas recentes (para pedidos de resumo)\n${chatList}\n\n## Mensagem da pessoa agora\n${userMessage}`;
   normalized.push({ role: 'user', content: context });
 
   const { text } = await callClaude({

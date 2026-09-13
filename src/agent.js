@@ -163,8 +163,10 @@ async function ingestWhatsAppMessage(person, m) {
   if (!inserted) return; // duplicado
 
   if (fromMe) {
-    // A pessoa respondeu por conta própria: pendência daquela conversa resolvida
+    // A pessoa respondeu por conta própria: pendência daquela conversa resolvida…
     await db.resolveItemsForChat(person.id, 'whatsapp', jid, 'replied');
+    // …e pode ter assumido um compromisso ("te mando amanhã"): extrai depois de juntar as mensagens
+    if (!group) scheduleCommitments(person.id, jid, { contactLabel: `${evo.jidToNumber(jid)}` });
     return;
   }
   scheduleTriage(person.id, 'whatsapp', jid, { group, contactLabel: group ? `grupo ${jid}` : `${senderName} (${senderId})` });
@@ -248,6 +250,55 @@ async function runTriage(personId, channel, chatId, opts) {
   }
 }
 
+// ---------- compromissos assumidos pela pessoa ----------
+const commitDebounces = new Map();
+function scheduleCommitments(personId, chatId, opts = {}) {
+  const key = `${personId}:${chatId}`;
+  if (commitDebounces.has(key)) clearTimeout(commitDebounces.get(key));
+  commitDebounces.set(key, setTimeout(() => {
+    commitDebounces.delete(key);
+    runCommitments(personId, chatId, opts).catch((e) => logger.error('Erro ao extrair compromissos', { key, err: String(e.message) }));
+  }, config.agent.debounceMs));
+}
+async function runCommitments(personId, chatId, opts) {
+  const person = await db.getPerson(personId);
+  if (!person || !person.active || !ai.claudeConfigured()) return;
+  const history = await db.recentChatMessages(personId, chatId, 30);
+  const since = now() - 15 * 60;
+  const fresh = history.filter((m) => m.direction === 'out' && m.ts >= since && !m.text.startsWith(MARK));
+  if (!fresh.length) return;
+  // Só vale a pena chamar a IA se parecer promessa/agenda
+  const hint = /\b(te mando|mando|envio|te envio|passo|ligo|te ligo|amanh[ãa]|hoje|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|semana|at[ée]|prazo|agend|marc|combinad|fico de|vou (mandar|enviar|ligar|passar|ver|resolver|agendar|pagar)|pode deixar|deixa comigo)\b/i;
+  if (!fresh.some((m) => hint.test(m.text))) return;
+  const contactName = history.find((m) => m.direction === 'in' && m.sender_name)?.sender_name || opts.contactLabel || chatId;
+  const list = await ai.extractCommitments({ person, contactLabel: contactName, history, fresh });
+  for (const c of list) {
+    if (c.ja_cumprido) continue;
+    let dueTs = null;
+    if (c.due_at) { const t = Date.parse(c.due_at); if (!Number.isNaN(t)) dueTs = Math.floor(t / 1000); }
+    await db.insertCommitment({
+      person_id: personId, channel: 'whatsapp', chat_id: chatId, contact_name: c.para_quem || contactName,
+      summary: c.descricao, deadline: c.quando_texto, due_ts: dueTs, last_message_ts: fresh[fresh.length - 1].ts, urgency: dueTs ? 3 : 2,
+    });
+  }
+  if (list.length) logger.info('Compromissos registrados', { person: person.name, contact: contactName, n: list.length });
+}
+/** Lembretes: avisa quando um compromisso da pessoa está a até 2h de vencer (ou já venceu). */
+async function checkReminders() {
+  const horizon = now() + 2 * 3600;
+  for (const person of await db.listPeople()) {
+    if (!person.active || person.wa_state !== 'open' || inQuietHours(person)) continue;
+    const due = await db.dueCommitments(person.id, horizon);
+    if (!due.length) continue;
+    const fmt = (ts) => new Intl.DateTimeFormat('pt-BR', { timeZone: person.timezone, weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(ts * 1000));
+    const lines = due.map((it) => `- #${it.id} ${it.summary} (para ${it.contact_name}) — ${fmt(it.due_ts)}${it.due_ts < now() ? ' — já passou' : ''}`);
+    try {
+      await notifyPerson(person, `*Lembrete do que você ficou de fazer:*\n${lines.join('\n')}\n\nQuando fizer, responda *feito #id*.`, 'urgent');
+      for (const it of due) await db.markReminded(it.id);
+    } catch (e) { logger.error('Falha ao enviar lembrete', { person: person.name, err: String(e.message) }); }
+  }
+}
+
 // ---------- resumo periódico ----------
 export async function sendDigest(person, { label = 'nas últimas 24h' } = {}) {
   if (!ai.claudeConfigured()) throw new Error('ANTHROPIC_API_KEY ausente');
@@ -301,6 +352,7 @@ async function handleUserCommand(person, text) {
       '- *agenda* — próximos compromissos',
       '- *enviar #12* — mando a resposta sugerida do item 12',
       '- *feito #12* — marca o item 12 como resolvido',
+      '- *resume a conversa com [nome]* — o que foi conversado e combinado com aquele contato',
       'Ou fale comigo normalmente: "responde pro João que amanhã às 10h fica bom", "o que a Maria queria?", "prepara uma resposta educada pro cliente X".',
     ].join('\n'));
   }
@@ -316,11 +368,22 @@ async function handleUserCommand(person, text) {
   if (!ai.claudeConfigured()) return notifyPerson(person, 'A IA não está configurada no servidor (ANTHROPIC_API_KEY).');
   const history = (await db.recentAlerts(person.id, 20)).slice(0, -1); // sem a mensagem atual
   const items = await db.openItems(person.id);
-  const out = await ai.chat({ person, history, items, calendar: await calendarText(person), userMessage: t });
+  const chats = await db.recentChats(person.id, 40);
+  const out = await ai.chat({ person, history, items, chats, calendar: await calendarText(person), userMessage: t });
   let reply = out.reply;
   for (const a of out.actions || []) {
     const item = a.item_id ? await db.getItem(a.item_id) : null;
     if (item && item.person_id !== person.id) continue;
+    if (a.type === 'summarize_chat' && a.chat_id) {
+      const msgs = await db.recentChatMessages(person.id, a.chat_id, 80);
+      if (!msgs.length) { reply += '\n\nNão encontrei mensagens dessa conversa no meu histórico.'; continue; }
+      const contact = chats.find((c) => c.chat_id === a.chat_id);
+      const label = `${contact?.name || msgs.find((m) => m.direction === 'in')?.sender_name || evo.jidToNumber(a.chat_id)} (${evo.jidToNumber(a.chat_id)})`;
+      const summary = await ai.summarizeConversation({ person, contactLabel: label, messages: msgs, request: t });
+      await notifyPerson(person, `*Conversa com ${label}*\n${summary}`);
+      if (!reply || /vou (buscar|ver|resumir)|um momento|já (te )?(mando|trago)/i.test(reply)) reply = '';
+      continue;
+    }
     if (a.type === 'send_reply' && item && a.text) {
       await sendReplyToContact(person, item, a.text, { silent: true });
       reply += `\n\nEnviado para ${item.contact_name}.`;
@@ -335,7 +398,7 @@ async function handleUserCommand(person, text) {
       await sendDigest(person, { label: 'até agora' });
     }
   }
-  return notifyPerson(person, reply);
+  if (reply.trim()) return notifyPerson(person, reply);
 }
 
 async function sendReplyToContact(person, item, text, { silent = false } = {}) {
@@ -392,6 +455,9 @@ export function startSchedulers() {
   setInterval(safe(syncAllCalendars), config.agent.calendarPollMs);
   setTimeout(safe(syncAllCalendars), 5000);
   setInterval(safe(checkDigests), 30000);
+  // Lembretes de compromissos assumidos pela pessoa (a cada 5 min)
+  setInterval(safe(checkReminders), 5 * 60 * 1000);
+  setTimeout(safe(checkReminders), 45000);
   // Renova o perfil de estilo/contexto (a cada 12h verifica quem está com perfil velho ou sem perfil)
   setInterval(safe(refreshStaleProfiles), 12 * 3600 * 1000);
   setTimeout(safe(refreshStaleProfiles), 120000);
