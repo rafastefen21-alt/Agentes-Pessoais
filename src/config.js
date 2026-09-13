@@ -18,7 +18,8 @@ function withScheme(url) {
 export const config = {
   port: num(process.env.PORT, 3000),
   // URL pública deste servidor (a Evolution precisa dela para chamar o webhook). Aceita com ou sem "https://".
-  appUrl: withScheme((process.env.APP_URL || '').trim().replace(/\/+$/, '')),
+  // No Railway, se APP_URL não for definida, usa o domínio público que ele injeta (RAILWAY_PUBLIC_DOMAIN).
+  appUrl: withScheme((process.env.APP_URL || process.env.RAILWAY_PUBLIC_DOMAIN || '').trim().replace(/\/+$/, '')),
   adminPassword: process.env.ADMIN_PASSWORD || '',
   appSecret: process.env.APP_SECRET || '',
   logLevel: process.env.LOG_LEVEL || 'info',
