@@ -89,10 +89,7 @@ async function viewPeople() {
     <div class="card" id="newForm" hidden>
       <h2>${icon('user')} Nova pessoa</h2>
       <form id="createForm">
-        <div class="two">
-          <div class="field"><label>Nome</label><input name="name" required placeholder="Ex.: Rafael Marques"></div>
-          <div class="field"><label>Número do WhatsApp (com DDI, só dígitos)</label><input name="phone" placeholder="5511999998888"><div class="hint">Pode deixar em branco: é detectado ao conectar o WhatsApp.</div></div>
-        </div>
+        <div class="field"><label>Nome</label><input name="name" required placeholder="Ex.: Rafael Marques"><div class="hint">O número do WhatsApp é detectado sozinho quando a pessoa conectar. Se a detecção falhar, dá para informar em Preferências.</div></div>
         <div class="field"><label>Contexto para a assistente (quem é a pessoa, prioridades, clientes VIP, tom de resposta)</label>
           <textarea name="context_notes" placeholder="Ex.: Sou dono de uma agência de marketing. Clientes têm prioridade máxima. Fornecedores podem esperar. Respondo de forma curta e cordial. Minha esposa é a Ana; família sempre importante."></textarea></div>
         <div class="two">
@@ -108,7 +105,7 @@ async function viewPeople() {
     e.preventDefault();
     const f = new FormData(e.target);
     try {
-      const { person } = await api('/people', { method: 'POST', body: { name: f.get('name'), phone: f.get('phone'), context_notes: f.get('context_notes'), timezone: f.get('timezone'), ignore_groups: f.get('ignore_groups') === '1' } });
+      const { person } = await api('/people', { method: 'POST', body: { name: f.get('name'), context_notes: f.get('context_notes'), timezone: f.get('timezone'), ignore_groups: f.get('ignore_groups') === '1' } });
       toast('Pessoa criada. Agora conecte o WhatsApp.');
       location.hash = `#/p/${person.id}`;
     } catch (err) { toast(err.message, true); }
@@ -288,7 +285,7 @@ function tabPrefs(body, { person: p }) {
       <form id="prefForm">
         <div class="two">
           <div class="field"><label>Nome</label><input name="name" value="${esc(p.name)}"></div>
-          <div class="field"><label>Número do WhatsApp (só dígitos, com DDI)</label><input name="phone" value="${esc(p.phone || '')}"></div>
+          <div class="field"><label>Número do WhatsApp (só dígitos, com DDI)</label><input name="phone" value="${esc(p.phone || '')}" placeholder="detectado ao conectar"><div class="hint">Preenchido automaticamente na conexão. Edite só se a detecção falhar ou o número estiver errado.</div></div>
         </div>
         <div class="field"><label>Contexto para a assistente</label><textarea name="context_notes">${esc(p.context_notes || '')}</textarea>
           <div class="hint">Quanto mais contexto (quem são os clientes, o que é prioridade, como a pessoa gosta de responder), melhor a triagem e as sugestões.</div></div>
