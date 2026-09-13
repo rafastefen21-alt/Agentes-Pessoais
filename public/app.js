@@ -201,6 +201,11 @@ function wireWaBlock(p, role) {
 function tabWhatsApp(body, { person: p }) {
   stopWaPolls();
   body.innerHTML = `
+    <div class="card" id="linkCard">
+      <h2>${icon('link')} Enviar link para a pessoa conectar sozinha</h2>
+      <p class="small muted">Gera um endereço sem senha, válido por 7 dias, com os QR codes das duas conexões. Mande no WhatsApp da pessoa; ela abre no computador ou em outro celular e escaneia.</p>
+      <div id="linkBody" class="loading">Carregando…</div>
+    </div>
     ${waBlock(p, 'person')}
     ${p.notify_mode === 'assistant' ? waBlock(p, 'assistant') : `<div class="card"><h2>${icon('bot')} 2. Número da assistente</h2><p class="small muted">Esta pessoa está configurada para receber os avisos na conversa "Você" do próprio WhatsApp. Para usar um número dedicado da assistente, mude "Avisar por" em Preferências.</p></div>`}
     <div class="card">
@@ -214,6 +219,28 @@ function tabWhatsApp(body, { person: p }) {
     </div>`;
   wireWaBlock(p, 'person');
   if (p.notify_mode === 'assistant') wireWaBlock(p, 'assistant');
+  const renderLink = (link) => {
+    const el = document.getElementById('linkBody'); el.className = '';
+    if (!link) {
+      el.innerHTML = `<div class="row"><button class="primary" id="genLink">${icon('link')} Gerar link de conexão</button></div>`;
+    } else {
+      const msg = `Oi, ${p.name.split(' ')[0]}! Este é o link para conectar a sua assistente ao WhatsApp. Abra no computador ou em outro celular e escaneie os QR codes: ${link.url}`;
+      const wa = p.phone ? `https://wa.me/${p.phone}?text=${encodeURIComponent(msg)}` : null;
+      el.innerHTML = `
+        <div class="field"><input readonly value="${esc(link.url)}" id="linkInput" onclick="this.select()"></div>
+        <div class="row">
+          <button class="primary" id="copyLink">${icon('check')} Copiar link</button>
+          ${wa ? `<a class="btn" href="${wa}" target="_blank" rel="noopener">${icon('send')} Mandar pelo WhatsApp</a>` : ''}
+          <button id="genLink">${icon('refresh')} Gerar outro</button>
+          <button class="danger" id="revokeLink">${icon('x')} Invalidar</button>
+          <span class="small muted">vale até ${new Date(link.expires_at * 1000).toLocaleString('pt-BR')}</span>
+        </div>`;
+      document.getElementById('copyLink').onclick = async () => { try { await navigator.clipboard.writeText(link.url); toast('Link copiado'); } catch { document.getElementById('linkInput').select(); toast('Selecione e copie o link'); } };
+      document.getElementById('revokeLink').onclick = async () => { await api(`/people/${p.id}/connect-link`, { method: 'DELETE' }); toast('Link invalidado'); renderLink(null); };
+    }
+    document.getElementById('genLink').onclick = async () => { try { const r = await api(`/people/${p.id}/connect-link`, { method: 'POST' }); renderLink(r.link); toast('Link gerado'); } catch (e) { toast(e.message, true); } };
+  };
+  api(`/people/${p.id}/connect-link`).then((r) => renderLink(r.link)).catch((e) => { document.getElementById('linkBody').textContent = e.message; });
 }
 
 // ---------- e-mail ----------

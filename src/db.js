@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS people (
   style_profile TEXT,
   profile_updated_at BIGINT,
   profile_status TEXT DEFAULT '',
+  connect_token TEXT,
+  connect_token_exp BIGINT,
   notify_mode TEXT NOT NULL DEFAULT 'assistant',
   ignore_groups INTEGER NOT NULL DEFAULT 1,
   email_enabled INTEGER NOT NULL DEFAULT 0,
@@ -143,6 +145,8 @@ const MIGRATIONS = [
   'ALTER TABLE people ADD COLUMN style_profile TEXT',
   'ALTER TABLE people ADD COLUMN profile_updated_at BIGINT',
   "ALTER TABLE people ADD COLUMN profile_status TEXT DEFAULT ''",
+  'ALTER TABLE people ADD COLUMN connect_token TEXT',
+  'ALTER TABLE people ADD COLUMN connect_token_exp BIGINT',
   "ALTER TABLE items ADD COLUMN owner TEXT NOT NULL DEFAULT 'contact'",
   'ALTER TABLE items ADD COLUMN due_ts BIGINT',
   'ALTER TABLE items ADD COLUMN reminded_at BIGINT',
@@ -271,6 +275,9 @@ export function listPeople() {
 }
 export function getPerson(id) {
   return get('SELECT * FROM people WHERE id = $1', [id]);
+}
+export function getPersonByConnectToken(token) {
+  return get('SELECT * FROM people WHERE connect_token = $1', [token]);
 }
 export function getPersonByLoginEmail(email) {
   return get('SELECT * FROM people WHERE LOWER(login_email) = LOWER($1)', [email]);

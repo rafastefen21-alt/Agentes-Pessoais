@@ -86,7 +86,7 @@ cloudflared tunnel --url http://localhost:3000
 ## Configurando uma pessoa
 
 1. **Pessoas → Nova pessoa**: nome, contexto (quem é, prioridades, clientes VIP, tom) e se lê grupos.
-2. **WhatsApp**: duas conexões, cada uma com seu QR:
+2. **WhatsApp**: na aba, clique em **Gerar link de conexão** e mande para a pessoa (há um botão que abre o WhatsApp dela com a mensagem pronta). O link vale 7 dias, não pede senha e mostra os QR codes das duas conexões; ela abre no computador ou em outro celular e escaneia. Você também pode conectar direto pelo portal: duas conexões, cada uma com seu QR:
    - **WhatsApp da pessoa (leitura)**: escaneia no celular da própria pessoa (Aparelhos conectados). O número é detectado sozinho.
    - **Número da assistente**: um chip exclusivo dessa pessoa, de onde a assistente escreve e recebe os comandos. Escaneia no aparelho que tem esse chip. Peça para a pessoa salvar o contato.
 3. **E-mail**: servidor IMAP (há presets: Gmail, Outlook, iCloud…), usuário e senha de app. "Testar conexão" e salvar. Só e-mails novos a partir daí são lidos.

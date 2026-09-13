@@ -5,7 +5,7 @@ import { logger } from '../logger.js';
 import * as db from '../db.js';
 import * as evo from '../evolution.js';
 import * as email from '../email.js';
-import { encrypt } from '../crypto.js';
+import { encrypt, randomToken } from '../crypto.js';
 import { hashPassword } from '../auth.js';
 import { monthlySummary, regenerateMonthly } from '../monthly.js';
 import { connectInstance, instanceStatus } from '../whatsapp.js';
@@ -27,7 +27,7 @@ function slug(s) {
 }
 function publicPerson(p) {
   if (!p) return p;
-  const { imap_pass, wa_qr, assistant_qr, login_pass, ...rest } = p;
+  const { imap_pass, wa_qr, assistant_qr, login_pass, connect_token, ...rest } = p;
   return { ...rest, has_imap_pass: Boolean(imap_pass), has_qr: Boolean(wa_qr), has_assistant_qr: Boolean(assistant_qr), has_login: Boolean(login_pass) };
 }
 /** ?role=person (WhatsApp da pessoa) ou ?role=assistant (número da assistente). */
@@ -157,6 +157,30 @@ api.delete('/people/:id', wrap(async (req, res) => {
     }
   }
   await db.deletePerson(p.id);
+  res.json({ ok: true });
+}));
+
+// ---------- link de conexão (sem login) para mandar à pessoa ----------
+const CONNECT_LINK_TTL = 7 * 86400;
+function connectLinkPayload(p) {
+  const now = Math.floor(Date.now() / 1000);
+  const valid = p.connect_token && p.connect_token_exp && p.connect_token_exp > now;
+  return valid ? { url: `${config.appUrl}/conectar?t=${p.connect_token}`, expires_at: p.connect_token_exp } : null;
+}
+api.get('/people/:id/connect-link', wrap(async (req, res) => {
+  const p = await loadPerson(req, res); if (!p) return;
+  res.json({ ok: true, link: connectLinkPayload(p) });
+}));
+api.post('/people/:id/connect-link', wrap(async (req, res) => {
+  const p = await loadPerson(req, res); if (!p) return;
+  if (!config.appUrl) return res.status(400).json({ ok: false, error: 'APP_URL não definida: o link precisa do endereço público do servidor.' });
+  const token = randomToken(24);
+  await db.setPersonFields(p.id, { connect_token: token, connect_token_exp: Math.floor(Date.now() / 1000) + CONNECT_LINK_TTL });
+  res.json({ ok: true, link: connectLinkPayload(await db.getPerson(p.id)) });
+}));
+api.delete('/people/:id/connect-link', wrap(async (req, res) => {
+  const p = await loadPerson(req, res); if (!p) return;
+  await db.setPersonFields(p.id, { connect_token: null, connect_token_exp: null });
   res.json({ ok: true });
 }));
 
