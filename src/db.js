@@ -140,7 +140,23 @@ async function initPostgres() {
   pool.on('error', (e) => logger.error('Postgres pool', { err: String(e.message) }));
   // BIGINT (OID 20) vem como string por padrão → número
   pg.types.setTypeParser(20, (v) => (v === null ? null : Number(v)));
-  const client = await pool.connect();
+  if (/\[YOUR-PASSWORD\]/i.test(config.databaseUrl)) {
+    throw new Error('DATABASE_URL ainda contém [YOUR-PASSWORD]. Substitua pela senha do banco do Supabase.');
+  }
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (e) {
+    if (e.code === '28P01') {
+      throw new Error('Supabase recusou a senha do banco (28P01). Confira: (1) a senha em DATABASE_URL é a do banco (Project Settings → Database), não a da conta; '
+        + '(2) se a senha tem caracteres como @ # % & / : ?, eles precisam ser codificados na URL (ex.: @ → %40) — ou redefina a senha só com letras e números em Database → Reset database password; '
+        + '(3) na URL do pooler (porta 6543) o usuário é "postgres.<ref-do-projeto>", não apenas "postgres".');
+    }
+    if (e.code === 'ENOTFOUND' || e.code === 'ENETUNREACH' || e.code === 'ECONNREFUSED') {
+      throw new Error(`Não foi possível alcançar o Postgres (${e.code}). No Railway use a URL do Transaction pooler (porta 6543), que funciona sem IPv6.`);
+    }
+    throw e;
+  }
   try {
     for (const stmt of schemaSql('postgres').split(';').map((s) => s.trim()).filter(Boolean)) {
       try { await client.query(stmt); } catch (e) {
