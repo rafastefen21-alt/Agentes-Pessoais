@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { insertUsage } from '../db.js';
 
 let client = null;
 export function claudeConfigured() {
@@ -54,8 +55,41 @@ const ChatSchema = z.object({
   })),
 });
 
+// ---------- preços (US$ por 1 milhão de tokens) ----------
+// [padrão do id do modelo, entrada, saída, leitura de cache]. Escrita de cache = 1,25x a entrada.
+// Atualize aqui se a Anthropic mudar a tabela: https://www.anthropic.com/pricing
+const PRICES = [
+  [/fable-5|mythos-5/, 10, 50, 0.25],
+  [/opus-5|opus-4-[678]/, 5, 25, 0.5],
+  [/sonnet-5/, 2, 10, 0.2],
+  [/sonnet-4-6/, 3, 15, 0.3],
+  [/haiku-4-5/, 1, 5, 0.1],
+];
+export function estimateCost(model, usage = {}) {
+  const row = PRICES.find(([re]) => re.test(String(model || ''))) || PRICES[1];
+  const [, pin, pout, pcache] = row;
+  const M = 1_000_000;
+  return (usage.input_tokens || 0) * pin / M + (usage.output_tokens || 0) * pout / M
+    + (usage.cache_read_input_tokens || 0) * pcache / M + (usage.cache_creation_input_tokens || 0) * pin * 1.25 / M;
+}
+async function recordUsage(meta, response) {
+  if (!meta) return;
+  const u = response.usage || {};
+  const model = response.model || config.claude.model;
+  try {
+    await insertUsage({
+      person_id: meta.personId, kind: meta.kind, model,
+      input_tokens: u.input_tokens, output_tokens: u.output_tokens,
+      cache_read_tokens: u.cache_read_input_tokens, cache_write_tokens: u.cache_creation_input_tokens,
+      cost_usd: estimateCost(model, u),
+    });
+  } catch (e) {
+    logger.warn('Não foi possível registrar uso da API', { err: String(e.message) });
+  }
+}
+
 // ---------- chamada base ----------
-async function callClaude({ system, messages, format, effort, maxTokens = 4000 }) {
+async function callClaude({ system, messages, format, effort, maxTokens = 4000, meta }) {
   const c = getClient();
   const base = {
     model: config.claude.model,
@@ -82,6 +116,7 @@ async function callClaude({ system, messages, format, effort, maxTokens = 4000 }
     const why = response.stop_details?.explanation || response.stop_details?.category || 'sem detalhe';
     throw new Error(`Claude recusou a solicitação (${why})`);
   }
+  await recordUsage(meta, response);
   const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
   logger.debug('Claude usage', { in: response.usage?.input_tokens, out: response.usage?.output_tokens, cached: response.usage?.cache_read_input_tokens, stop: response.stop_reason });
   return { text, response };
@@ -141,6 +176,7 @@ export async function triage(p) {
     format: zodOutputFormat(TriageSchema),
     effort: config.claude.triageEffort,
     maxTokens: 2000,
+    meta: { personId: p.person.id, kind: 'triagem' },
   });
   const data = parseJson(text, TriageSchema);
   return { ...data, urgency_level: URGENCY_LEVEL[data.urgency] };
@@ -162,6 +198,7 @@ export async function digest({ person, items, calendar, stats, sinceLabel }) {
     messages: [{ role: 'user', content: user }],
     effort: config.claude.digestEffort,
     maxTokens: 3000,
+    meta: { personId: person.id, kind: 'resumo' },
   });
   return text;
 }
@@ -197,6 +234,7 @@ Regras de ação:
     format: zodOutputFormat(ChatSchema),
     effort: config.claude.triageEffort,
     maxTokens: 3000,
+    meta: { personId: person.id, kind: 'conversa' },
   });
   return parseJson(text, ChatSchema);
 }

@@ -38,6 +38,8 @@ export const config = {
     triageEffort: process.env.CLAUDE_TRIAGE_EFFORT || 'medium',
     digestEffort: process.env.CLAUDE_DIGEST_EFFORT || 'high',
     fallbacks: bool(process.env.CLAUDE_FALLBACKS, true),
+    // Cotação opcional para mostrar os custos também em reais no portal (0 = só dólar)
+    usdBrl: num(process.env.USD_BRL_RATE, 0),
   },
 
   agent: {

@@ -32,6 +32,42 @@ async function loadPerson(req, res) {
   return p;
 }
 
+// ---------- custos ----------
+const DAY = 86400;
+function startOfToday() { const d = new Date(); d.setHours(0, 0, 0, 0); return Math.floor(d.getTime() / 1000); }
+function startOfMonth() { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return Math.floor(d.getTime() / 1000); }
+async function usageBlock(personId) {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    today: await db.usageSummary(personId, startOfToday()),
+    last7d: await db.usageSummary(personId, now - 7 * DAY),
+    month: await db.usageSummary(personId, startOfMonth()),
+    last30d: await db.usageSummary(personId, now - 30 * DAY),
+    total: await db.usageSummary(personId, 0),
+  };
+}
+api.get('/usage', wrap(async (req, res) => {
+  const now = Math.floor(Date.now() / 1000);
+  const people = Object.fromEntries((await db.listPeople()).map((p) => [p.id, p.name]));
+  const label = (r) => ({ ...r, name: people[r.person_id] || '(pessoa excluída)' });
+  res.json({
+    ok: true, usdBrl: config.claude.usdBrl,
+    month: (await db.usageByPerson(startOfMonth())).map(label),
+    last30d: (await db.usageByPerson(now - 30 * DAY)).map(label),
+    totals: await usageBlock(null),
+  });
+}));
+api.get('/people/:id/usage', wrap(async (req, res) => {
+  const p = await loadPerson(req, res); if (!p) return;
+  const now = Math.floor(Date.now() / 1000);
+  res.json({
+    ok: true, usdBrl: config.claude.usdBrl,
+    ...(await usageBlock(p.id)),
+    byKind30d: await db.usageByKind(p.id, now - 30 * DAY),
+    daily: await db.usageDaily(p.id, now - 30 * DAY),
+  });
+}));
+
 // ---------- status geral ----------
 api.get('/status', wrap(async (req, res) => {
   let evolution = { ok: false };
@@ -54,8 +90,9 @@ api.get('/email-presets', (req, res) => res.json({ ok: true, presets: email.IMAP
 // ---------- pessoas ----------
 api.get('/people', wrap(async (req, res) => {
   const people = [];
-  for (const p of await db.listPeople()) people.push({ ...publicPerson(p), stats: await db.stats(p.id) });
-  res.json({ ok: true, people });
+  const month = startOfMonth();
+  for (const p of await db.listPeople()) people.push({ ...publicPerson(p), stats: await db.stats(p.id), usage_month: await db.usageSummary(p.id, month) });
+  res.json({ ok: true, people, usdBrl: config.claude.usdBrl });
 }));
 
 api.post('/people', wrap(async (req, res) => {

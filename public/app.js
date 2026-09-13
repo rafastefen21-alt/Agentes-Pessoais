@@ -28,6 +28,12 @@ function stateBadge(s) {
   return `<span class="badge ${cls}">${esc(label)}</span>`;
 }
 const URG = { 1: 'baixa', 2: 'média', 3: 'alta', 4: 'crítica' };
+function money(usd, rate) {
+  const v = Number(usd || 0);
+  const us = 'US$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: v < 0.1 && v > 0 ? 4 : 2 });
+  return rate ? `${us} (R$ ${(v * rate).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : us;
+}
+function tokens(n) { return Number(n || 0).toLocaleString('pt-BR'); }
 function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
 // ---------- login ----------
@@ -55,7 +61,7 @@ document.getElementById('logoutBtn').onclick = async () => { await api('/logout'
 // ---------- lista de pessoas ----------
 async function viewPeople() {
   stopPolling();
-  const { people } = await api('/people');
+  const { people, usdBrl } = await api('/people');
   const cards = people.map((p) => `
     <div class="card person-card" onclick="location.hash='#/p/${p.id}'">
       <div class="row"><span class="name grow">${esc(p.name)}</span>${stateBadge(p.wa_state)}${p.active ? '' : '<span class="badge bad">pausado</span>'}</div>
@@ -63,6 +69,7 @@ async function viewPeople() {
       <div class="stats">
         <span>24h: <b>${p.stats.last24h.whatsapp || 0}</b> WhatsApp · <b>${p.stats.last24h.email || 0}</b> e-mails</span>
         <span>Pendências: <b>${p.stats.openItems}</b> (<b>${p.stats.urgentItems}</b> urgentes)</span>
+        <span>IA no mês: <b>${money(p.usage_month?.cost_usd, usdBrl)}</b></span>
       </div>
     </div>`).join('');
   $app.innerHTML = `
@@ -104,7 +111,7 @@ async function viewPerson(id) {
   let data;
   try { data = await api(`/people/${id}`); } catch (e) { $app.innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
   const { person: p } = data;
-  const tabs = [['whatsapp', '📱 WhatsApp'], ['email', '✉️ E-mail'], ['calendar', '📅 Agenda'], ['prefs', '⚙️ Preferências'], ['items', '📌 Pendências'], ['chat', '💬 Conversa com a assistente'], ['messages', '📥 Mensagens lidas']];
+  const tabs = [['whatsapp', '📱 WhatsApp'], ['email', '✉️ E-mail'], ['calendar', '📅 Agenda'], ['prefs', '⚙️ Preferências'], ['items', '📌 Pendências'], ['chat', '💬 Conversa com a assistente'], ['messages', '📥 Mensagens lidas'], ['usage', '💰 Custos']];
   $app.innerHTML = `
     <div class="row" style="margin-bottom:12px">
       <a href="#/">← Pessoas</a>
@@ -118,7 +125,25 @@ async function viewPerson(id) {
   document.getElementById('digestBtn').onclick = async () => { try { toast('Gerando resumo…'); await api(`/people/${id}/digest`, { method: 'POST' }); toast('Resumo enviado no WhatsApp.'); } catch (e) { toast(e.message, true); } };
   document.getElementById('testBtn').onclick = async () => { try { await api(`/people/${id}/notify`, { method: 'POST', body: {} }); toast('Mensagem de teste enviada.'); } catch (e) { toast(e.message, true); } };
   const body = document.getElementById('tabBody');
-  ({ whatsapp: tabWhatsApp, email: tabEmail, calendar: tabCalendar, prefs: tabPrefs, items: tabItems, chat: tabChat, messages: tabMessages })[currentTab](body, data);
+  ({ whatsapp: tabWhatsApp, email: tabEmail, calendar: tabCalendar, prefs: tabPrefs, items: tabItems, chat: tabChat, messages: tabMessages, usage: tabUsage })[currentTab](body, data);
+}
+
+async function tabUsage(body, { person: p }) {
+  body.innerHTML = '<div class="loading">Carregando custos…</div>';
+  const u = await api(`/people/${p.id}/usage`);
+  const row = (label, s) => `<tr><td>${label}</td><td>${s.calls}</td><td>${tokens(s.input_tokens)}</td><td>${tokens(s.output_tokens)}</td><td>${tokens(s.cache_read_tokens)}</td><td><b>${money(s.cost_usd, u.usdBrl)}</b></td></tr>`;
+  const head = '<tr><th>Período</th><th>Chamadas</th><th>Tokens entrada</th><th>Tokens saída</th><th>Lidos do cache</th><th>Custo</th></tr>';
+  body.innerHTML = `
+    <div class="card"><h2>Gasto com IA — ${esc(p.name)}</h2>
+      <table>${head}${row('Hoje', u.today)}${row('Últimos 7 dias', u.last7d)}${row('Este mês', u.month)}${row('Últimos 30 dias', u.last30d)}${row('Desde o início', u.total)}</table>
+      <div class="hint" style="margin-top:8px">Valores estimados a partir dos tokens de cada chamada e da tabela de preços da Anthropic (tokens lidos do cache custam ~10% da entrada). A fatura oficial é a do console da Anthropic.</div>
+    </div>
+    <div class="card"><h2>Por tipo de uso (30 dias)</h2>
+      ${u.byKind30d.length ? `<table><tr><th>Tipo</th><th>Chamadas</th><th>Tokens entrada</th><th>Tokens saída</th><th>Lidos do cache</th><th>Custo</th></tr>${u.byKind30d.map((k) => row(esc(k.kind), k)).join('')}</table>` : '<div class="empty">Nenhuma chamada ainda.</div>'}
+    </div>
+    <div class="card"><h2>Por dia (30 dias)</h2>
+      ${u.daily.length ? `<table><tr><th>Dia</th><th>Chamadas</th><th>Tokens entrada</th><th>Tokens saída</th><th>Lidos do cache</th><th>Custo</th></tr>${u.daily.map((d) => row(esc(d.day), d)).join('')}</table>` : '<div class="empty">Nenhuma chamada ainda.</div>'}
+    </div>`;
 }
 
 function tabWhatsApp(body, { person: p }) {
@@ -313,10 +338,15 @@ function tabMessages(body, { messages }) {
 // ---------- status ----------
 async function viewStatus() {
   stopPolling();
-  const s = await api('/status');
+  const [s, u] = await Promise.all([api('/status'), api('/usage')]);
+  const totalMonth = u.month.reduce((a, r) => a + Number(r.cost_usd || 0), 0);
   $app.innerHTML = `
     <h1>Status do sistema</h1>
     ${s.problems.map((p) => `<div class="problem">⚠️ ${esc(p)}</div>`).join('')}
+    <div class="card"><h2>Gasto com IA por pessoa — este mês (total ${money(totalMonth, u.usdBrl)})</h2>
+      ${u.month.length ? `<table><tr><th>Pessoa</th><th>Chamadas</th><th>Tokens entrada</th><th>Tokens saída</th><th>Lidos do cache</th><th>Custo</th></tr>${u.month.map((r) => `<tr><td>${r.person_id ? `<a href="#/p/${r.person_id}">${esc(r.name)}</a>` : esc(r.name)}</td><td>${r.calls}</td><td>${tokens(r.input_tokens)}</td><td>${tokens(r.output_tokens)}</td><td>${tokens(r.cache_read_tokens)}</td><td><b>${money(r.cost_usd, u.usdBrl)}</b></td></tr>`).join('')}</table>` : '<div class="empty">Nenhuma chamada à IA registrada neste mês.</div>'}
+      <div class="small muted" style="margin-top:8px">Hoje: ${money(u.totals.today.cost_usd, u.usdBrl)} · 7 dias: ${money(u.totals.last7d.cost_usd, u.usdBrl)} · 30 dias: ${money(u.totals.last30d.cost_usd, u.usdBrl)} · desde o início: ${money(u.totals.total.cost_usd, u.usdBrl)}</div>
+    </div>
     <div class="card"><h2>Configuração</h2>
       <table>
         <tr><th>URL pública (APP_URL)</th><td class="mono">${esc(s.appUrl || '— não definida —')}</td></tr>

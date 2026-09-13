@@ -94,6 +94,20 @@ CREATE TABLE IF NOT EXISTS calendar_events (
   UNIQUE(person_id, uid, start_ts)
 );
 
+CREATE TABLE IF NOT EXISTS api_usage (
+  id {{ID}},
+  person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  model TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+  created_at BIGINT NOT NULL DEFAULT {{NOW}}
+);
+CREATE INDEX IF NOT EXISTS idx_usage_person ON api_usage(person_id, created_at);
+
 CREATE TABLE IF NOT EXISTS kv (
   k TEXT PRIMARY KEY, v TEXT
 );
@@ -101,7 +115,7 @@ CREATE TABLE IF NOT EXISTS kv (
 
 // No Supabase, tabelas sem RLS ficam expostas pela API pública (anon key).
 // Ligamos o RLS sem políticas: só a conexão direta (este servidor) acessa.
-const PG_SECURITY = ['people', 'messages', 'items', 'alerts', 'calendar_events', 'kv']
+const PG_SECURITY = ['people', 'messages', 'items', 'alerts', 'calendar_events', 'api_usage', 'kv']
   .map((t) => `ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;`).join('\n');
 
 export function schemaSql(dialect = 'postgres') {
@@ -323,6 +337,38 @@ export async function replaceCalendarEvents(personId, events) {
 export function calendarEventsBetween(personId, fromTs, toTs) {
   return all(`SELECT * FROM calendar_events WHERE person_id = $1 AND start_ts < $2 AND COALESCE(end_ts, start_ts) >= $3 ORDER BY start_ts`,
     [personId, toTs, fromTs]);
+}
+
+// ---------- uso da API (custos) ----------
+export async function insertUsage(u) {
+  await run(`INSERT INTO api_usage (person_id, kind, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [
+    u.person_id ?? null, u.kind, u.model || null, u.input_tokens || 0, u.output_tokens || 0,
+    u.cache_read_tokens || 0, u.cache_write_tokens || 0, u.cost_usd || 0, Math.floor(Date.now() / 1000)]);
+}
+const USAGE_SUMS = `COUNT(*) AS calls, COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens,
+  COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens, COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, COALESCE(SUM(cost_usd),0) AS cost_usd`;
+// O Postgres devolve SUM/COUNT como string → número
+const numify = (r) => Object.fromEntries(Object.entries(r || {}).map(([k, v]) => [k, typeof v === 'string' && /^[0-9.]+$/.test(v) ? Number(v) : v]));
+/** Totais de uso. personId null = todas as pessoas. */
+export async function usageSummary(personId, sinceTs = 0) {
+  const r = personId
+    ? await get(`SELECT ${USAGE_SUMS} FROM api_usage WHERE person_id = $1 AND created_at >= $2`, [personId, sinceTs])
+    : await get(`SELECT ${USAGE_SUMS} FROM api_usage WHERE created_at >= $1`, [sinceTs]);
+  return numify(r);
+}
+export async function usageByKind(personId, sinceTs = 0) {
+  const rows = await all(`SELECT kind, ${USAGE_SUMS} FROM api_usage WHERE person_id = $1 AND created_at >= $2 GROUP BY kind ORDER BY kind`, [personId, sinceTs]);
+  return rows.map(numify);
+}
+export async function usageByPerson(sinceTs = 0) {
+  const rows = await all(`SELECT person_id, ${USAGE_SUMS} FROM api_usage WHERE created_at >= $1 GROUP BY person_id ORDER BY cost_usd DESC`, [sinceTs]);
+  return rows.map(numify);
+}
+export async function usageDaily(personId, sinceTs = 0) {
+  const day = dialect === 'postgres' ? "to_char(to_timestamp(created_at), 'YYYY-MM-DD')" : "date(created_at, 'unixepoch')";
+  const rows = await all(`SELECT ${day} AS day, ${USAGE_SUMS} FROM api_usage WHERE person_id = $1 AND created_at >= $2 GROUP BY ${day} ORDER BY day DESC`, [personId, sinceTs]);
+  return rows.map(numify);
 }
 
 // ---------- estatísticas ----------

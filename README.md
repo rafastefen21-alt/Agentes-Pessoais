@@ -97,6 +97,7 @@ Por padrão a assistente escreve na conversa "Você" (mensagem para o próprio n
 ## Custos e privacidade
 
 - Cada conversa com mensagens novas gera uma chamada ao Claude (com cache do prompt). Ajuste `CLAUDE_TRIAGE_EFFORT` para `low` se quiser reduzir custo.
+- **Gasto por pessoa no portal**: toda chamada à IA é registrada na tabela `api_usage` com tokens e custo estimado. A aba **Custos** de cada pessoa mostra hoje / 7 dias / mês / 30 dias / total, por tipo (triagem, resumo, conversa) e por dia; a página **Status do sistema** mostra o ranking do mês. Defina `USD_BRL_RATE` para ver também em reais. A tabela de preços fica em `src/ai/claude.js` (`PRICES`); a fatura oficial é a do console da Anthropic.
 - Senhas de e-mail ficam criptografadas (AES-256-GCM) com `APP_SECRET`/`data/secret.key`.
 - Mensagens ficam no banco (Supabase). Apagar a pessoa no portal apaga tudo dela e a instância na Evolution.
 
