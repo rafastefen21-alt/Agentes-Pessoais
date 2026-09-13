@@ -8,6 +8,7 @@ import * as evo from './evolution.js';
 import * as email from './email.js';
 import { syncCalendar, upcomingEvents, formatEvents } from './calendar.js';
 import * as ai from './ai/claude.js';
+import { scheduleLearnAfterConnect, refreshStaleProfiles } from './learn.js';
 
 const MARK = config.agent.marker;
 const debounces = new Map(); // key person:chat → timeout
@@ -95,6 +96,8 @@ export async function handleEvolutionEvent(instance, body) {
         const num = await evo.fetchProfileNumber(instance);
         if (num) await db.setPersonFields(person.id, { [cols.phone]: num });
       }
+      // WhatsApp da pessoa acabou de conectar: aprende o contexto e o estilo dela com o histórico
+      if (state === 'open' && role === 'person' && person.wa_state !== 'open') scheduleLearnAfterConnect(person.id);
     }
     return;
   }
@@ -389,6 +392,9 @@ export function startSchedulers() {
   setInterval(safe(syncAllCalendars), config.agent.calendarPollMs);
   setTimeout(safe(syncAllCalendars), 5000);
   setInterval(safe(checkDigests), 30000);
+  // Renova o perfil de estilo/contexto (a cada 12h verifica quem está com perfil velho ou sem perfil)
+  setInterval(safe(refreshStaleProfiles), 12 * 3600 * 1000);
+  setTimeout(safe(refreshStaleProfiles), 120000);
   setInterval(safe(refreshConnectionStates), 120000);
   setTimeout(safe(refreshConnectionStates), 3000);
   logger.info('Agendadores iniciados');

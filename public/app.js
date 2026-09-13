@@ -306,6 +306,10 @@ function tabPrefs(body, { person: p }) {
         <div class="row"><button class="primary" type="submit">${icon('check')} Salvar</button><span class="grow"></span><button type="button" class="danger" id="delBtn">${icon('trash')} Excluir pessoa</button></div>
       </form>
     </div>
+    <div class="card" id="profileCard">
+      <h2>${icon('sparkles')} Perfil aprendido com o histórico <span class="grow"></span><button class="small" id="learnBtn">${icon('refresh')} Reaprender agora</button></h2>
+      <div id="profileBody" class="loading">Carregando…</div>
+    </div>
     <div class="card">
       <h2>${icon('key')} Acesso do cliente ao painel "Minha assistente"</h2>
       <p class="small muted">A pessoa entra em <a href="/cliente" target="_blank">${location.origin}/cliente ${icon('external')}</a> e vê os gastos com IA, o resumo do mês e a agenda dela. Só os dados dela.</p>
@@ -328,6 +332,26 @@ function tabPrefs(body, { person: p }) {
   document.getElementById('delBtn').onclick = async () => {
     if (!confirm(`Excluir ${p.name} e as instâncias do WhatsApp? Isso apaga todo o histórico.`)) return;
     try { await api(`/people/${p.id}`, { method: 'DELETE' }); toast('Excluído'); location.hash = '#/'; } catch (err) { toast(err.message, true); }
+  };
+  const renderProfile = (r) => {
+    const pr = r.profile;
+    document.getElementById('profileBody').className = '';
+    document.getElementById('profileBody').innerHTML = pr ? `
+      <p>${esc(pr.contexto)}</p>
+      <h3>Como escreve</h3><p>${esc(pr.estilo)}</p>
+      ${pr.expressoes?.length ? `<h3>Expressões típicas</h3><p>${pr.expressoes.map((x) => `<span class="badge">${esc(x)}</span>`).join(' ')}</p>` : ''}
+      ${pr.exemplos?.length ? `<h3>Exemplos reais</h3><ul class="clean">${pr.exemplos.map((x) => `<li>"${esc(x)}"</li>`).join('')}</ul>` : ''}
+      ${pr.contatos?.length ? `<h3>Contatos importantes</h3><table>${pr.contatos.map((c) => `<tr><td><b>${esc(c.nome)}</b></td><td>${esc(c.relacao)}</td><td class="muted">${esc(c.observacao || '')}</td></tr>`).join('')}</table>` : ''}
+      ${pr.prioridades?.length ? `<h3>Prioridades percebidas</h3><ul class="clean">${pr.prioridades.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+      <div class="hint" style="margin-top:10px">Baseado em ${pr.based_on?.outgoing || 0} mensagens escritas pela pessoa e ${pr.based_on?.incoming || 0} recebidas. Atualizado em ${pr.generated_at ? new Date(pr.generated_at * 1000).toLocaleString('pt-BR') : '—'}. Renova sozinho a cada 7 dias. A assistente usa isso para escrever como a pessoa e para saber quem importa.</div>`
+      : `<div class="empty">Ainda sem perfil. Ele é aprendido automaticamente cerca de 1,5 min depois que o WhatsApp da pessoa conecta. ${r.status ? `<br><span class="small">Status: ${esc(r.status)}</span>` : ''}</div>`;
+  };
+  api(`/people/${p.id}/profile`).then(renderProfile).catch((e) => { document.getElementById('profileBody').textContent = e.message; });
+  document.getElementById('learnBtn').onclick = async (e) => {
+    e.target.disabled = true; toast('Lendo o histórico e aprendendo…');
+    try { const r = await api(`/people/${p.id}/profile/learn`, { method: 'POST' }); renderProfile(r); toast(r.profile ? 'Perfil atualizado' : 'Ainda não há mensagens suficientes: ' + r.status); }
+    catch (err) { toast(err.message, true); }
+    e.target.disabled = false;
   };
   const af = document.getElementById('accessForm');
   af.onsubmit = async (e) => {

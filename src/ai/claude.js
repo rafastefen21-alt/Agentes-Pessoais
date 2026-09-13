@@ -137,6 +137,20 @@ function parseJson(text, schema) {
   return parsed.data;
 }
 
+function profileBlock(person) {
+  if (!person.style_profile) return '';
+  let p; try { p = JSON.parse(person.style_profile); } catch { return ''; }
+  const lines = ['\n## Perfil aprendido com o histórico do WhatsApp'];
+  if (p.contexto) lines.push(`Contexto: ${p.contexto}`);
+  if (p.estilo) lines.push(`Como ela escreve: ${p.estilo}`);
+  if (p.expressoes?.length) lines.push(`Expressões e marcas típicas: ${p.expressoes.join(' | ')}`);
+  if (p.exemplos?.length) lines.push(`Exemplos reais de mensagens dela:\n${p.exemplos.map((e) => `- "${e}"`).join('\n')}`);
+  if (p.contatos?.length) lines.push(`Contatos importantes: ${p.contatos.map((c) => `${c.nome} (${c.relacao})`).join('; ')}`);
+  if (p.prioridades?.length) lines.push(`O que costuma ser prioridade: ${p.prioridades.join('; ')}`);
+  lines.push('Ao sugerir respostas, imite esse estilo (tamanho, tom, saudações, pontuação, vocabulário) — deve parecer que foi ela quem escreveu.');
+  return lines.join('\n');
+}
+
 function personBlock(person, extras = {}) {
   const now = new Intl.DateTimeFormat('pt-BR', { timeZone: person.timezone, dateStyle: 'full', timeStyle: 'short' }).format(new Date());
   return [
@@ -144,8 +158,39 @@ function personBlock(person, extras = {}) {
     `Nome: ${person.name}`,
     `Agora: ${now} (${person.timezone})`,
     person.context_notes ? `Contexto e prioridades (escrito por ela):\n${person.context_notes}` : 'Contexto: (não informado)',
+    profileBlock(person),
     extras.calendar ? `\n## Agenda (próximos dias)\n${extras.calendar}` : '',
   ].filter(Boolean).join('\n');
+}
+
+// ---------- perfil de estilo e contexto (aprendido do histórico) ----------
+const ProfileSchema = z.object({
+  contexto: z.string().describe('2 a 4 frases: o que a pessoa faz, com quem lida, que tipo de assunto domina as conversas.'),
+  estilo: z.string().describe('Como ela escreve: formalidade, tamanho das mensagens, saudações e despedidas, pontuação, abreviações, uso de áudio/emoji, tom com clientes vs. amigos.'),
+  expressoes: z.array(z.string()).describe('5 a 12 expressões, aberturas ou fechos que ela usa de verdade (copiados das mensagens).'),
+  exemplos: z.array(z.string()).describe('4 a 8 mensagens reais dela, curtas, que representam bem o jeito de escrever (sem dados sensíveis).'),
+  contatos: z.array(z.object({ nome: z.string(), relacao: z.string().describe('cliente, fornecedor, sócio, família, amigo, equipe…'), observacao: z.string().nullable() })).describe('Até 12 contatos mais relevantes e o que se percebe da relação.'),
+  prioridades: z.array(z.string()).describe('O que parece ter prioridade para ela (tipos de pedido, pessoas, prazos).'),
+});
+export async function styleProfile({ person, outgoing, incoming, contacts }) {
+  const fmt = (m) => `[${m.chat_id.split('@')[0]}] ${m.text.slice(0, 300)}`;
+  const user = [
+    `## Pessoa: ${person.name}`,
+    person.context_notes ? `Contexto informado por ela: ${person.context_notes}` : '',
+    `\n## Contatos com mais conversa (número, nome, recebidas/enviadas)\n${contacts.map((c) => `- ${c.chat_id.split('@')[0]} ${c.name || ''}: ${c.received}/${c.sent}`).join('\n')}`,
+    `\n## Mensagens ESCRITAS PELA PESSOA (mais recentes primeiro)\n${outgoing.map(fmt).join('\n')}`,
+    `\n## Amostra de mensagens RECEBIDAS\n${incoming.map((m) => `[${m.chat_id.split('@')[0]} ${m.sender_name || ''}] ${m.text.slice(0, 200)}`).join('\n')}`,
+    `\nEstude o material e descreva o contexto e o estilo de escrita da pessoa. Seja específico e fiel ao que está nas mensagens; não invente. Responda no formato JSON pedido.`,
+  ].filter(Boolean).join('\n');
+  const { text } = await callClaude({
+    system: 'Você analisa históricos de WhatsApp para que uma assistente pessoal consiga escrever exatamente como o dono da conta. Responda em português do Brasil, sem emojis.',
+    messages: [{ role: 'user', content: user }],
+    format: zodOutputFormat(ProfileSchema),
+    effort: config.claude.digestEffort,
+    maxTokens: 4000,
+    meta: { personId: person.id, kind: 'perfil' },
+  });
+  return parseJson(text, ProfileSchema);
 }
 
 // ---------- triagem ----------

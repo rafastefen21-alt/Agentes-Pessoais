@@ -9,6 +9,7 @@ import { encrypt } from '../crypto.js';
 import { hashPassword } from '../auth.js';
 import { monthlySummary, regenerateMonthly } from '../monthly.js';
 import { connectInstance, instanceStatus } from '../whatsapp.js';
+import { learnProfile } from '../learn.js';
 import { syncCalendar, upcomingEvents } from '../calendar.js';
 import { claudeConfigured } from '../ai/claude.js';
 import { notifyPerson, sendDigest, pollEmail, ROLES } from '../agent.js';
@@ -176,6 +177,19 @@ api.put('/people/:id/client-access', wrap(async (req, res) => {
   }
   await db.setPersonFields(p.id, fields);
   res.json({ ok: true, person: publicPerson(await db.getPerson(p.id)) });
+}));
+
+// ---------- perfil aprendido (estilo e contexto) ----------
+api.get('/people/:id/profile', wrap(async (req, res) => {
+  const p = await loadPerson(req, res); if (!p) return;
+  let profile = null; try { profile = p.style_profile ? JSON.parse(p.style_profile) : null; } catch { profile = null; }
+  res.json({ ok: true, profile, status: p.profile_status || '', updated_at: p.profile_updated_at || null });
+}));
+api.post('/people/:id/profile/learn', wrap(async (req, res) => {
+  const p = await loadPerson(req, res); if (!p) return;
+  const profile = await learnProfile(p, { force: true });
+  const fresh = await db.getPerson(p.id);
+  res.json({ ok: true, profile, status: fresh.profile_status || '' });
 }));
 
 // ---------- relatório mensal (visão do admin) ----------

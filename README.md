@@ -12,6 +12,7 @@ Uma assistente que lê o WhatsApp e os e-mails de uma pessoa, avisa no próprio 
 | Horários configurados (ex.: 08:00, 13:00, 18:00) | Manda o resumo: o que precisa de resposta, agenda de hoje/amanhã, conflitos e o resto em uma linha. |
 | A pessoa responde para a assistente | `enviar #12`, `resumo`, `agenda`, `feito #12`, `ajuda`, ou texto livre ("responde pro João que amanhã às 10h fica bom", "o que a Maria queria?"). A assistente só envia mensagem a terceiros quando a pessoa pede explicitamente. |
 | A pessoa responde o contato por conta própria | A pendência daquela conversa é fechada automaticamente. |
+| O WhatsApp da pessoa conecta | Cerca de 1,5 min depois, a assistente importa as conversas recentes e aprende um **perfil**: como a pessoa escreve (tom, tamanho, saudações, expressões, exemplos reais), quem são os contatos importantes e o que costuma ser prioridade. Esse perfil entra em toda triagem, resumo e sugestão de resposta, e é renovado a cada 7 dias (ou em Preferências → Perfil aprendido → Reaprender). |
 
 ## Arquitetura
 

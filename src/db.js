@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS people (
   assistant_phone TEXT DEFAULT '',
   login_email TEXT,
   login_pass TEXT,
+  style_profile TEXT,
+  profile_updated_at BIGINT,
+  profile_status TEXT DEFAULT '',
   notify_mode TEXT NOT NULL DEFAULT 'assistant',
   ignore_groups INTEGER NOT NULL DEFAULT 1,
   email_enabled INTEGER NOT NULL DEFAULT 0,
@@ -134,6 +137,9 @@ const MIGRATIONS = [
   "ALTER TABLE people ADD COLUMN assistant_phone TEXT DEFAULT ''",
   'ALTER TABLE people ADD COLUMN login_email TEXT',
   'ALTER TABLE people ADD COLUMN login_pass TEXT',
+  'ALTER TABLE people ADD COLUMN style_profile TEXT',
+  'ALTER TABLE people ADD COLUMN profile_updated_at BIGINT',
+  "ALTER TABLE people ADD COLUMN profile_status TEXT DEFAULT ''",
 ];
 const isDuplicateColumn = (e) => /duplicate column|already exists/i.test(String(e.message));
 
@@ -317,6 +323,19 @@ export function recentMessages(personId, limit = 50) {
 }
 export function messagesSince(personId, sinceTs) {
   return all('SELECT * FROM messages WHERE person_id = $1 AND ts >= $2 ORDER BY ts', [personId, sinceTs]);
+}
+
+/** Amostra das mensagens mais recentes de uma direção (para aprender o estilo). */
+export function sampleMessages(personId, direction, limit = 200) {
+  return all(`SELECT chat_id, sender_name, text, ts FROM messages WHERE person_id = $1 AND direction = $2 AND channel = 'whatsapp'
+    AND LENGTH(text) > 1 ORDER BY ts DESC LIMIT $3`, [personId, direction, limit]);
+}
+/** Contatos com mais mensagens trocadas. */
+export async function topContacts(personId, limit = 25) {
+  const rows = await all(`SELECT chat_id, MAX(CASE WHEN direction = 'in' THEN sender_name END) AS name,
+      SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS received, SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS sent, MAX(ts) AS last_ts
+    FROM messages WHERE person_id = $1 AND channel = 'whatsapp' GROUP BY chat_id ORDER BY (received + sent) DESC LIMIT $2`, [personId, limit]);
+  return rows.map((r) => ({ ...r, received: Number(r.received), sent: Number(r.sent) }));
 }
 
 // ---------- pendências ----------

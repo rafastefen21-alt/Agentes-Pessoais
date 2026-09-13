@@ -112,6 +112,21 @@ export async function findMessages(instance, remoteJid, { pageSize = 50 } = {}) 
   return Array.isArray(m.records) ? m.records : Array.isArray(m) ? m : [];
 }
 
+/** Lista de conversas que a Evolution conhece (formato varia por versão). */
+export async function findChats(instance) {
+  const r = await evo('POST', `chat/findChats/${instance}`, {});
+  const arr = Array.isArray(r) ? r : r?.chats || r?.records || [];
+  return arr.map((c) => ({ remoteJid: c.remoteJid || c.id || c.jid || '', updatedAt: c.updatedAt || c.lastMsgTimestamp || null }))
+    .filter((c) => c.remoteJid)
+    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+}
+/** Mensagens mais recentes sem filtro de conversa. */
+export async function findRecentMessages(instance, { pageSize = 300 } = {}) {
+  const r = await evo('POST', `chat/findMessages/${instance}`, { where: {}, page: 1, offset: pageSize });
+  const m = r?.messages || r || {};
+  return Array.isArray(m.records) ? m.records : Array.isArray(m) ? m : [];
+}
+
 export async function fetchProfileNumber(instance) {
   // Descobre o número conectado (owner) da instância
   try {
